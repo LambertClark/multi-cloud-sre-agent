@@ -1,0 +1,34 @@
+[project]
+name = "multi-cloud-sre-agent"
+version = "0.1.0"
+description = "智能多云SRE Agent系统 - 基于LangChain+LlamaIndex的云服务管理助手"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "langchain>=1.1.2",
+    "llama-index>=0.14.10",
+    "llama-index-llms-openai>=0.6.10",
+    "llama-index-embeddings-huggingface>=0.3.0",
+    "llama-index-core>=0.14.10",
+    "llama-index-vector-stores-chroma>=0.3.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=4.9.0",
+    "pydantic>=2.5.0",
+    "aiohttp>=3.9.0",
+    "asyncio-throttle>=1.0.0",
+    "langchain-openai>=1.1.0",
+    "langchain-core>=0.3.0",
+    "boto3>=1.34.0",
+    "python-dotenv>=1.0.0",
+    "chromadb>=0.4.0",
+    "markdown>=3.5.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.11.0",
+    "pytest>=9.0.1",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.14.8",
+]

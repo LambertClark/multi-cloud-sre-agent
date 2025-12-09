@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+
+# Environment variables
+.env
+.env.local
+
+# Data and outputs
+data/
+generated/
+*.log
+
+# Generated files
+generated_code.*
+*_docs.json
+*_spec_docs.json
+result.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
