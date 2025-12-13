@@ -76,7 +76,7 @@ class RAGConfig:
     chunk_overlap: int = 50
     top_k: int = 5
     similarity_threshold: float = 0.7
-    embedding_model: str = "BAAI/bge-large-zh-v1.5"  # 硅基流动支持的模型
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"  # 硅基流动支持的模型
     use_chromadb: bool = True  # 使用ChromaDB
     cloud_docs_dir: str = "./docs"  # 组员整理的文档目录
 
