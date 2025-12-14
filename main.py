@@ -62,6 +62,28 @@ async def query_command(query: str, output_file: str = None):
         for log_entry in result.get("execution_log", []):
             print(f"  [{log_entry.get('step')}] {log_entry.get('status', 'N/A')}")
 
+        # 打印API调用追踪
+        api_trace = result.get("api_trace", [])
+        if api_trace:
+            print(f"\n🔗 API Call Trace:")
+            for trace in api_trace:
+                trace_type = trace.get("type", "unknown")
+                timestamp = trace.get("timestamp", "").split("T")[-1][:8]  # 只显示时间部分
+                
+                if trace_type == "existing_tool":
+                    print(f"  - [{timestamp}] Call: {trace.get('cloud_provider')}.{trace.get('service')}.{trace.get('operation')}")
+                    if trace.get('parameters'):
+                        print(f"    Params: {json.dumps(trace.get('parameters'), ensure_ascii=False)}")
+                elif trace_type == "code_generation":
+                    print(f"  - [{timestamp}] CodeGen: {trace.get('cloud_provider')}.{trace.get('service')}.{trace.get('operation')}")
+                    print(f"    Note: {trace.get('note')}")
+                elif trace_type == "task_execution":
+                    print(f"  - [{timestamp}] Task: {trace.get('cloud_provider')}.{trace.get('service')}.{trace.get('operation')}")
+                    if trace.get('parameters'):
+                        print(f"    Params: {json.dumps(trace.get('parameters'), ensure_ascii=False)}")
+                else:
+                    print(f"  - [{timestamp}] {trace}")
+
         # 打印结果
         final_result = result.get("result", {})
         print(f"\n🎯 Result:")

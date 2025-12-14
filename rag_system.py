@@ -39,6 +39,7 @@ class RAGSystem:
         self.config = get_config()
         self.indices: Dict[str, VectorStoreIndex] = {}
         self.chroma_client = None
+        self._embed_model_initialized = False
         self._init_settings()
         if self.config.rag.use_chromadb:
             self._init_chromadb()
@@ -54,9 +55,10 @@ class RAGSystem:
         )
 
         # 配置Embedding模型 - 使用HuggingFace本地模型
-        Settings.embed_model = HuggingFaceEmbedding(
-            model_name=self.config.rag.embedding_model
-        )
+        # 延迟加载，避免启动时下载大模型
+        # Settings.embed_model = HuggingFaceEmbedding(
+        #     model_name=self.config.rag.embedding_model
+        # )
 
         # 配置文本分割器
         Settings.node_parser = SentenceSplitter(
@@ -65,6 +67,18 @@ class RAGSystem:
         )
 
         logger.info("RAG system settings initialized")
+
+    def _lazy_init_embedding(self):
+        """延迟初始化Embedding模型"""
+        if self._embed_model_initialized:
+            return
+
+        logger.info(f"Initializing embedding model: {self.config.rag.embedding_model}")
+        Settings.embed_model = HuggingFaceEmbedding(
+            model_name=self.config.rag.embedding_model
+        )
+        self._embed_model_initialized = True
+        logger.info("Embedding model initialized")
 
     def _init_chromadb(self):
         """初始化ChromaDB客户端"""
@@ -94,6 +108,8 @@ class RAGSystem:
             索引结果
         """
         try:
+            self._lazy_init_embedding()
+            
             cloud_provider = spec_data.get("cloud_provider", "unknown")
             service = spec_data.get("service", "unknown")
 
@@ -295,6 +311,8 @@ class RAGSystem:
             查询结果
         """
         try:
+            self._lazy_init_embedding()
+
             if top_k is None:
                 top_k = self.config.rag.top_k
 

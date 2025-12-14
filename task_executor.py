@@ -23,6 +23,7 @@ class ExecutionResult:
     data: Any = None
     error: Optional[str] = None
     execution_time: float = 0.0
+    api_calls: List[Dict[str, Any]] = None  # 记录该步骤调用的API
 
 
 class TaskExecutor:
@@ -54,18 +55,25 @@ class TaskExecutor:
         try:
             plan_type = plan.get("type", "simple")
             steps = plan.get("steps", [])
-
+            
+            result = {}
             if plan_type == "simple":
                 # 简单任务：单步执行
-                return await self._execute_simple_plan(steps)
+                result = await self._execute_simple_plan(steps)
             elif plan_type in ["multi_step", "complex"]:
                 # 多步骤任务：DAG执行
-                return await self._execute_dag_plan(steps)
+                result = await self._execute_dag_plan(steps)
             else:
-                return {
+                result = {
                     "success": False,
                     "error": f"Unknown plan type: {plan_type}"
                 }
+            
+            # 确保返回结果中包含api_trace
+            if "api_trace" not in result:
+                result["api_trace"] = []
+                
+            return result
 
         except Exception as e:
             logger.error(f"Error executing plan: {str(e)}")
@@ -86,7 +94,8 @@ class TaskExecutor:
             "success": result.success,
             "data": result.data,
             "error": result.error,
-            "results": [result]
+            "results": [result],
+            "api_trace": result.api_calls or []
         }
 
     async def _execute_dag_plan(self, steps: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -155,11 +164,18 @@ class TaskExecutor:
         # 聚合最终结果
         final_data = self._aggregate_results(results, context)
 
+        # 收集所有步骤的API调用
+        api_trace = []
+        for r in results:
+            if r.api_calls:
+                api_trace.extend(r.api_calls)
+
         return {
             "success": all(r.success for r in results),
             "data": final_data,
             "results": results,
-            "context": context
+            "context": context,
+            "api_trace": api_trace
         }
 
     async def _execute_step(
@@ -210,12 +226,18 @@ class TaskExecutor:
                 )
 
             execution_time = time.time() - start_time
+            
+            # 提取API调用记录
+            api_calls = []
+            if isinstance(data, dict) and "api_calls" in data:
+                api_calls = data.pop("api_calls")
 
             return ExecutionResult(
                 step_id=step_id,
                 success=True,
                 data=data,
-                execution_time=execution_time
+                execution_time=execution_time,
+                api_calls=api_calls
             )
 
         except Exception as e:
@@ -241,6 +263,18 @@ class TaskExecutor:
         if resource_type == "ec2":
             # 使用AWS工具列出EC2实例
             result = await self.aws_tools._list_ec2_instances_impl(tags=tags)
+            
+            # 记录API调用
+            from datetime import datetime
+            if isinstance(result, dict):
+                result["api_calls"] = [{
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "task_execution",
+                    "cloud_provider": "aws",
+                    "service": "ec2",
+                    "operation": "describe_instances",
+                    "parameters": tags
+                }]
             return result
 
         return {"success": False, "error": f"Unsupported resource type: {resource_type}"}
@@ -262,6 +296,9 @@ class TaskExecutor:
 
         # 并行查询所有实例的指标
         tasks = []
+        api_calls = []
+        from datetime import datetime
+        
         for instance in resources:
             instance_id = instance.get("InstanceId")
             tasks.append(
@@ -275,6 +312,19 @@ class TaskExecutor:
                     end_time=parameters.get("end_time")
                 )
             )
+            # 记录每个API调用
+            api_calls.append({
+                "timestamp": datetime.now().isoformat(),
+                "type": "task_execution",
+                "cloud_provider": "aws",
+                "service": "cloudwatch",
+                "operation": "get_metric_statistics",
+                "parameters": {
+                    "namespace": namespace,
+                    "metric_name": metric_name,
+                    "instance_id": instance_id
+                }
+            })
 
         results = await asyncio.gather(*tasks)
 
@@ -289,7 +339,8 @@ class TaskExecutor:
 
         return {
             "success": True,
-            "metrics": metrics
+            "metrics": metrics,
+            "api_calls": api_calls
         }
 
     async def _execute_query_log(

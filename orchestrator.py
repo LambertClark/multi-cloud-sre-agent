@@ -135,6 +135,7 @@ class MultiCloudOrchestrator:
         """
         start_time = datetime.now()
         execution_log = []
+        api_trace = []  # 用于记录API调用
 
         try:
             # 暂时禁用自动加载文档（embedding模型需要配置）
@@ -175,6 +176,10 @@ class MultiCloudOrchestrator:
                 logger.info(f"Executing multi-step plan with {len(plan.get('steps', []))} steps")
 
                 result = await self.task_executor.execute_plan(plan)
+                
+                # 收集TaskExecutor中的API调用（如果支持）
+                if isinstance(result, dict) and "api_trace" in result:
+                    api_trace.extend(result["api_trace"])
 
                 execution_log.append({
                     "step": "task_execution",
@@ -204,24 +209,22 @@ class MultiCloudOrchestrator:
 
                 intent = manager_response.data["intent"]
                 execution_plan = manager_response.data["execution_plan"]
-
-                logger.info(f"Intent: {intent.get('operation_type')} on {intent.get('cloud_provider')}.{intent.get('service')}")
-                logger.info(f"Execution plan: {len(execution_plan['steps'])} steps")
-
                 # 步骤2：执行计划
                 if execution_plan["has_existing_api"]:
                     # 使用现有API
                     result = await self._execute_with_existing_api(
                         execution_plan,
                         intent,
-                        execution_log
+                        execution_log,
+                        api_trace
                     )
                 else:
                     # 动态生成代码
                     result = await self._execute_with_code_generation(
                         execution_plan,
                         intent,
-                        execution_log
+                        execution_log,
+                        api_trace
                     )
 
             end_time = datetime.now()
@@ -233,6 +236,7 @@ class MultiCloudOrchestrator:
                 "intent": intent,
                 "execution_plan": execution_plan,
                 "execution_log": execution_log,
+                "api_trace": api_trace,
                 "duration": duration,
                 "timestamp": end_time.isoformat()
             }
@@ -244,12 +248,12 @@ class MultiCloudOrchestrator:
                 str(e),
                 execution_log
             )
-
     async def _execute_with_existing_api(
         self,
         execution_plan: Dict[str, Any],
         intent: Dict[str, Any],
-        execution_log: List[Dict[str, Any]]
+        execution_log: List[Dict[str, Any]],
+        api_trace: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """使用现有API执行"""
         logger.info("Executing with existing API")
@@ -258,6 +262,16 @@ class MultiCloudOrchestrator:
         service = intent.get("service")
         operation = intent.get("operation")
         parameters = intent.get("parameters", {})
+
+        # 记录API调用意图
+        api_trace.append({
+            "timestamp": datetime.now().isoformat(),
+            "type": "existing_tool",
+            "cloud_provider": cloud_provider,
+            "service": service,
+            "operation": operation,
+            "parameters": parameters
+        })
 
         # 调用API工具
         api_result = await self.tool_registry.call(
@@ -275,12 +289,12 @@ class MultiCloudOrchestrator:
         })
 
         return api_result
-
     async def _execute_with_code_generation(
         self,
         execution_plan: Dict[str, Any],
         intent: Dict[str, Any],
-        execution_log: List[Dict[str, Any]]
+        execution_log: List[Dict[str, Any]],
+        api_trace: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """通过代码生成执行"""
         logger.info("Executing with code generation pipeline")
@@ -289,6 +303,16 @@ class MultiCloudOrchestrator:
         service = intent.get("service")
         operation = intent.get("operation")
         parameters = intent.get("parameters", {})
+
+        # 记录代码生成意图
+        api_trace.append({
+            "timestamp": datetime.now().isoformat(),
+            "type": "code_generation",
+            "cloud_provider": cloud_provider,
+            "service": service,
+            "operation": operation,
+            "note": "API calls are embedded in generated code"
+        })
 
         # 步骤1：拉取API规格文档
         logger.info("Step 2.1: Fetching API specifications")
