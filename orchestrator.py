@@ -321,13 +321,6 @@ class MultiCloudOrchestrator:
             "service": service
         })
 
-        # 步骤1：拉取API规格文档
-        logger.info("Step 2.1: Fetching API specifications")
-        spec_response = await self.spec_doc_agent.safe_process({
-            "cloud_provider": cloud_provider,
-            "service": service
-        })
-
         if not spec_response.success:
             execution_log.append({
                 "step": "fetch_spec",
