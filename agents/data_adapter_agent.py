@@ -93,6 +93,20 @@ class DataAdapterAgent(BaseAgent):
                 "converter": "_convert_gcp_trace_fast",
             },
         },
+        "volc": {
+            "ecs_to_compute": {
+                "applicable": lambda data: "InstanceId" in data and "Status" in data,
+                "converter": "_convert_volc_ecs_fast",
+            },
+            "monitor_metric": {
+                "applicable": lambda data: "Data" in data and isinstance(data.get("Data"), list),
+                "converter": "_convert_volc_metric_fast",
+            },
+            "tls_logs": {
+                "applicable": lambda data: "LogItems" in data or "Topics" in data,
+                "converter": "_convert_volc_logs_fast",
+            },
+        },
         "kubernetes": {
             "pod_to_container": {
                 "applicable": lambda data: data.get("kind") == "Pod" or (
@@ -127,7 +141,7 @@ class DataAdapterAgent(BaseAgent):
             "规则引擎快速映射",
             "LLM智能适配未知格式",
             "RAG辅助理解API文档",
-            "支持AWS/Azure/GCP/阿里云/腾讯云/K8s等"
+            "支持AWS/Azure/GCP/火山云/阿里云/腾讯云/K8s等"
         ]
 
     def validate_input(self, input_data: Any) -> bool:
@@ -877,6 +891,142 @@ class DataAdapterAgent(BaseAgent):
             )
         except Exception as e:
             logger.error(f"Fast GCP Trace conversion failed: {str(e)}")
+            return None
+
+    # ==================== 火山云转换方法 ====================
+
+    def _convert_volc_ecs_fast(self, raw_data: Dict[str, Any], target_schema: str) -> Optional[Any]:
+        """火山云ECS快速转换"""
+        try:
+            from schemas.resource_schema import ComputeResource, ResourceState, ResourceType
+
+            # 火山云状态映射
+            state_mapping = {
+                "RUNNING": ResourceState.RUNNING,
+                "STOPPED": ResourceState.STOPPED,
+                "PENDING": ResourceState.PENDING,
+                "STOPPING": ResourceState.TERMINATING,
+                "STARTING": ResourceState.PENDING,
+                "ERROR": ResourceState.ERROR,
+            }
+
+            # 提取实例信息
+            state = state_mapping.get(raw_data.get("Status", "").upper(), ResourceState.UNKNOWN)
+
+            # 提取网络信息
+            network_interfaces = raw_data.get("NetworkInterfaces", [])
+            private_ip = network_interfaces[0].get("PrimaryIpAddress") if network_interfaces else None
+
+            # 提取公网IP
+            public_ip = None
+            if network_interfaces and network_interfaces[0].get("PublicIpAddress"):
+                public_ip = network_interfaces[0].get("PublicIpAddress")
+
+            return ComputeResource(
+                resource_id=raw_data.get("InstanceId"),
+                resource_name=raw_data.get("InstanceName"),
+                resource_type=ResourceType.ECS_VOLC,
+                cloud_provider="volc",
+                state=state,
+                region=raw_data.get("ZoneId", "").rsplit("-", 1)[0] if raw_data.get("ZoneId") else None,
+                availability_zone=raw_data.get("ZoneId"),
+                tags=raw_data.get("Tags", {}),
+                instance_type=raw_data.get("InstanceType"),
+                cpu_cores=raw_data.get("Cpus"),
+                memory_gb=raw_data.get("MemorySize"),
+                private_ip=private_ip,
+                public_ip=public_ip,
+                vpc_id=raw_data.get("VpcId"),
+                raw_data=raw_data,
+            )
+        except Exception as e:
+            logger.error(f"Fast Volcano ECS conversion failed: {str(e)}")
+            return None
+
+    def _convert_volc_metric_fast(self, raw_data: Dict[str, Any], target_schema: str) -> Optional[Any]:
+        """火山云Monitor快速转换"""
+        try:
+            from schemas.metric_schema import MetricResult, MetricDataPoint, MetricUnit, StatisticType
+
+            # 火山云监控数据格式: {"Data": [...]}
+            data_points_raw = raw_data.get("Data", [])
+            datapoints = []
+
+            for point in data_points_raw:
+                timestamp = datetime.fromtimestamp(point.get("Timestamp", 0))
+                value = point.get("Value", 0)
+
+                datapoints.append(MetricDataPoint(
+                    timestamp=timestamp,
+                    value=value,
+                    unit=MetricUnit.NONE,
+                    statistic=StatisticType.AVERAGE,
+                ))
+
+            # 排序数据点
+            datapoints.sort(key=lambda x: x.timestamp)
+
+            return MetricResult(
+                metric_name=raw_data.get("MetricName", "unknown"),
+                metric_namespace=raw_data.get("Namespace", "unknown"),
+                dimensions=raw_data.get("Dimensions", {}),
+                datapoints=datapoints,
+                unit=MetricUnit.NONE,
+                cloud_provider="volc",
+                raw_data=raw_data,
+            )
+        except Exception as e:
+            logger.error(f"Fast Volcano Metric conversion failed: {str(e)}")
+            return None
+
+    def _convert_volc_logs_fast(self, raw_data: Dict[str, Any], target_schema: str) -> Optional[Any]:
+        """火山云TLS日志快速转换"""
+        try:
+            from schemas.health_schema import LogHealth, SeverityLevel
+
+            # 火山云TLS日志格式
+            log_items = raw_data.get("LogItems", [])
+            total_logs = len(log_items)
+
+            # 统计各级别日志
+            error_count = 0
+            warning_count = 0
+            critical_count = 0
+
+            for log in log_items:
+                level = log.get("Level", "").upper()
+                if "FATAL" in level or "CRITICAL" in level:
+                    critical_count += 1
+                elif "ERROR" in level:
+                    error_count += 1
+                elif "WARN" in level:
+                    warning_count += 1
+
+            error_rate = error_count / total_logs if total_logs > 0 else 0
+
+            # 计算健康分数
+            is_healthy = error_rate < 0.01 and (warning_count / total_logs if total_logs > 0 else 0) < 0.05
+            health_score = max(0, 100 - (error_rate * 1000) - ((warning_count / total_logs if total_logs > 0 else 0) * 100))
+
+            return LogHealth(
+                log_source=raw_data.get("TopicId", "unknown"),
+                time_range={
+                    "start": raw_data.get("start_time", datetime.utcnow()),
+                    "end": raw_data.get("end_time", datetime.utcnow())
+                },
+                total_logs=total_logs,
+                error_count=error_count,
+                warning_count=warning_count,
+                critical_count=critical_count,
+                error_rate=error_rate,
+                is_healthy=is_healthy,
+                health_score=health_score,
+                critical_samples=[],
+                raw_data={},  # 不包含datetime的原始数据
+                cloud_provider="volc",
+            )
+        except Exception as e:
+            logger.error(f"Fast Volcano Logs conversion failed: {str(e)}")
             return None
 
     # ==================== 辅助方法 ====================

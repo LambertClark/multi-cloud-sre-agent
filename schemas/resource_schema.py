@@ -32,6 +32,7 @@ class ResourceType(str, Enum):
     CLOUD_LOAD_BALANCER = "cloud_lb"  # GCP Cloud Load Balancer
     SLB = "slb"              # 阿里云SLB
     CLB = "clb"              # 腾讯云CLB
+    CLB_VOLC = "clb_volc"    # 火山云CLB
 
     # CDN资源
     CLOUDFRONT = "cloudfront"     # AWS CloudFront
@@ -39,6 +40,7 @@ class ResourceType(str, Enum):
     CLOUD_CDN = "cloud_cdn"       # GCP Cloud CDN
     CDN_ALIYUN = "cdn_aliyun"     # 阿里云CDN
     CDN_TENCENT = "cdn_tencent"   # 腾讯云CDN
+    CDN_VOLC = "cdn_volc"         # 火山云CDN
 
 
 class ResourceState(str, Enum):
