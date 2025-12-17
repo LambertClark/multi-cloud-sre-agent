@@ -1,19 +1,32 @@
 """
 Manager Agent - 任务编排和流程控制
 负责解析用户请求、拆解任务、协调各子Agent
+支持ReAct模式：动态推理、自适应调整
 """
 from typing import Dict, Any, List, Optional
+from enum import Enum
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import json
 import logging
+import asyncio
 
 from .base_agent import BaseAgent, AgentResponse
+from .code_generator_agent import CodeGeneratorAgent
+from .data_adapter_agent import DataAdapterAgent
 from config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+class ActionType(Enum):
+    """Action类型"""
+    GENERATE_CODE = "generate_code"          # 生成代码
+    ADAPT_DATA = "adapt_data"                # 转换数据
+    ANALYZE = "analyze"                      # LLM分析
+    FINISH = "finish"                        # 完成任务
 
 
 class ManagerAgent(BaseAgent):
@@ -31,6 +44,14 @@ class ManagerAgent(BaseAgent):
         self.llm = self._init_llm()
         self.available_tools = []
         self.registered_apis = {}  # 已注册的云服务API
+
+        # 注册子Agent
+        self.sub_agents = {
+            "code_generator": CodeGeneratorAgent(),
+            "data_adapter": DataAdapterAgent()
+        }
+
+        self.max_react_iterations = 8  # ReAct最大迭代次数
 
     def _init_llm(self) -> ChatOpenAI:
         """初始化LLM"""
@@ -471,3 +492,345 @@ class ManagerAgent(BaseAgent):
             "output": "Code execution not implemented yet",
             "code": code_data
         }
+
+    # ============ ReAct模式方法 ============
+
+    async def process_with_react(self, input_data: Dict[str, Any]) -> AgentResponse:
+        """
+        使用ReAct模式处理任务（推荐使用）
+
+        Args:
+            input_data: {
+                "user_request": "帮我分析电商平台的健康状况",
+                "context": {...},
+                "max_iterations": 8  # 可选
+            }
+
+        Returns:
+            AgentResponse with task results
+        """
+        user_request = input_data.get("user_request") or input_data.get("task") or input_data.get("query")
+        context = input_data.get("context", {})
+        max_iterations = input_data.get("max_iterations", self.max_react_iterations)
+
+        logger.info(f"ManagerAgent (ReAct) received: {user_request}")
+
+        try:
+            result = await self._react_loop(
+                user_request=user_request,
+                context=context,
+                max_iterations=max_iterations
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"ManagerAgent ReAct failed: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return AgentResponse(
+                success=False,
+                error=f"Manager Agent ReAct failed: {str(e)}",
+                agent_name=self.name
+            )
+
+    async def _react_loop(
+        self,
+        user_request: str,
+        context: Dict[str, Any],
+        max_iterations: int
+    ) -> AgentResponse:
+        """ReAct主循环：Thought → Action → Observation"""
+        react_history = []
+        accumulated_data = {}
+
+        for iteration in range(1, max_iterations + 1):
+            logger.info(f"=== ReAct Iteration {iteration}/{max_iterations} ===")
+
+            # 1. Thought: LLM推理下一步
+            thought_result = await self._react_thought(
+                user_request=user_request,
+                context=context,
+                history=react_history,
+                accumulated_data=accumulated_data,
+                iteration=iteration
+            )
+
+            thought = thought_result["thought"]
+            action = thought_result["action"]
+            is_final = thought_result.get("is_final", False)
+
+            logger.info(f"Thought: {thought[:150]}...")
+            logger.info(f"Action: {action['type']}")
+
+            # 2. Action: 执行动作
+            observation = await self._execute_action(action, accumulated_data)
+
+            logger.info(f"Observation: {observation.get('status')}")
+
+            # 3. 记录历史
+            react_history.append({
+                "iteration": iteration,
+                "thought": thought,
+                "action": action,
+                "observation": observation
+            })
+
+            # 4. 更新数据
+            if observation.get("success"):
+                data = observation.get("data", {})
+                accumulated_data.update(data)
+
+            # 5. 判断完成
+            if is_final or observation.get("task_completed"):
+                logger.info(f"✅ Task completed in {iteration} iterations")
+
+                final_report = await self._generate_final_report(
+                    user_request, react_history, accumulated_data
+                )
+
+                return AgentResponse(
+                    success=True,
+                    data={
+                        "result": final_report,
+                        "accumulated_data": accumulated_data,
+                        "iterations": iteration,
+                        "react_history": react_history
+                    },
+                    message=f"Task completed in {iteration} iterations",
+                    agent_name=self.name
+                )
+
+            # 检查失败
+            if observation.get("status") == "failed" and not observation.get("can_retry"):
+                return AgentResponse(
+                    success=False,
+                    data={
+                        "accumulated_data": accumulated_data,
+                        "iterations": iteration,
+                        "react_history": react_history
+                    },
+                    error=observation.get("error"),
+                    agent_name=self.name
+                )
+
+        # 达到最大迭代
+        logger.warning(f"⚠️  Max iterations reached ({max_iterations})")
+        return AgentResponse(
+            success=False,
+            data={
+                "accumulated_data": accumulated_data,
+                "iterations": max_iterations,
+                "react_history": react_history
+            },
+            error=f"Max iterations ({max_iterations}) reached",
+            agent_name=self.name
+        )
+
+    async def _react_thought(
+        self,
+        user_request: str,
+        context: Dict,
+        history: List[Dict],
+        accumulated_data: Dict,
+        iteration: int
+    ) -> Dict[str, Any]:
+        """Thought阶段：LLM推理"""
+        system_prompt = """你是Manager Agent，负责任务编排。
+
+**可用子Agent：**
+- code_generator: 生成查询/操作代码
+- data_adapter: 转换数据格式
+
+**可用Action：**
+- generate_code: 生成代码
+- adapt_data: 转换数据
+- analyze: LLM分析
+- finish: 完成任务
+
+**输出JSON格式：**
+```json
+{
+  "thought": "我的推理...",
+  "action": {
+    "type": "generate_code",
+    "target": "code_generator",
+    "parameters": {...}
+  },
+  "is_final": false
+}
+```
+
+**原则：**
+1. 一次只做一件事
+2. 先收集数据，再分析
+3. 完成时用finish action
+"""
+
+        user_prompt = f"""# 用户请求
+{user_request}
+
+# 当前迭代
+第 {iteration} 次
+
+# 已完成步骤
+"""
+        if history:
+            for step in history[-3:]:  # 只显示最近3步
+                user_prompt += f"- {step['action']['type']}: {step['observation'].get('status')}\n"
+        else:
+            user_prompt += "（尚未开始）\n"
+
+        user_prompt += f"\n# 已收集数据\n{json.dumps(accumulated_data, ensure_ascii=False, indent=2)[:500]}\n\n决定下一步："
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt)
+        ]
+
+        response = await self._invoke_llm_with_retry(messages)
+
+        return self._parse_thought_response(response.content)
+
+    def _parse_thought_response(self, text: str) -> Dict:
+        """解析Thought输出"""
+        try:
+            import re
+            match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                json_str = text.strip()
+
+            result = json.loads(json_str)
+
+            if "thought" not in result or "action" not in result:
+                raise ValueError("Missing required fields")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to parse thought: {str(e)}")
+            return {
+                "thought": f"Parse error: {str(e)}",
+                "action": {"type": "analyze", "parameters": {}},
+                "is_final": False
+            }
+
+    async def _execute_action(
+        self,
+        action: Dict[str, Any],
+        accumulated_data: Dict
+    ) -> Dict[str, Any]:
+        """执行Action"""
+        action_type = action.get("type")
+
+        try:
+            if action_type == "generate_code":
+                target = action.get("target", "code_generator")
+                params = action.get("parameters", {})
+                agent = self.sub_agents.get(target)
+
+                if not agent:
+                    return {"success": False, "status": "failed", "error": f"Agent not found: {target}"}
+
+                result = await agent.process(params)
+
+                return {
+                    "success": result.success,
+                    "status": "success" if result.success else "failed",
+                    "data": {"generated_code": result.data.get("code")} if result.success else {},
+                    "error": result.error if not result.success else None
+                }
+
+            elif action_type == "adapt_data":
+                agent = self.sub_agents.get("data_adapter")
+                result = await agent.process(action.get("parameters", {}))
+
+                return {
+                    "success": result.success,
+                    "status": "success" if result.success else "failed",
+                    "data": {"adapted": result.data} if result.success else {},
+                    "error": result.error if not result.success else None
+                }
+
+            elif action_type == "analyze":
+                # LLM分析数据
+                prompt = f"分析数据：\n{json.dumps(accumulated_data, ensure_ascii=False, indent=2)}"
+                messages = [HumanMessage(content=prompt)]
+                response = await self._invoke_llm_with_retry(messages)
+
+                return {
+                    "success": True,
+                    "status": "success",
+                    "data": {"analysis": response.content}
+                }
+
+            elif action_type == "finish":
+                return {
+                    "success": True,
+                    "status": "completed",
+                    "task_completed": True
+                }
+
+            else:
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "error": f"Unknown action: {action_type}"
+                }
+
+        except Exception as e:
+            logger.error(f"Action execution failed: {str(e)}")
+            return {
+                "success": False,
+                "status": "failed",
+                "error": str(e),
+                "can_retry": True
+            }
+
+    async def _generate_final_report(
+        self,
+        user_request: str,
+        history: List[Dict],
+        accumulated_data: Dict
+    ) -> str:
+        """生成最终报告"""
+        prompt = f"""# 任务
+{user_request}
+
+# 执行过程
+{len(history)} 个步骤
+
+# 收集的数据
+{json.dumps(accumulated_data, ensure_ascii=False, indent=2)[:1000]}
+
+生成简洁的中文报告，包含：
+1. 完成了什么
+2. 关键发现
+3. 建议
+"""
+
+        messages = [HumanMessage(content=prompt)]
+        response = await self._invoke_llm_with_retry(messages)
+
+        return response.content
+
+    async def _invoke_llm_with_retry(self, messages: List, max_retries: int = 3) -> Any:
+        """带重试的LLM调用"""
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await self.llm.ainvoke(messages)
+                return response
+            except Exception as e:
+                error_msg = str(e).lower()
+                is_retriable = any(keyword in error_msg for keyword in [
+                    'connection', 'disconnect', 'timeout', 'network'
+                ])
+
+                if attempt < max_retries and is_retriable:
+                    wait_time = 2 ** (attempt - 1)
+                    logger.warning(f"LLM retry {attempt}/{max_retries} in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"LLM failed after {attempt} attempts")
+                    raise

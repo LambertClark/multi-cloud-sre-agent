@@ -132,6 +132,13 @@ class AWSMonitoringTools:
             metadata={"description": "获取服务依赖图"}
         )
 
+        # EC2 + Metrics Combined
+        self.tool_registry.register_tool(
+            "aws", "ec2", "batch_get_cpu_with_threshold",
+            self._batch_get_ec2_cpu_with_threshold_impl,
+            metadata={"description": "批量查询EC2实例CPU利用率并按阈值过滤"}
+        )
+
         logger.info("AWS monitoring tools registered successfully")
 
     async def _get_metric_statistics_impl(
@@ -754,6 +761,153 @@ class AWSMonitoringTools:
 
         except Exception as e:
             logger.error(f"Error querying logs: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def _batch_get_ec2_cpu_with_threshold_impl(
+        self,
+        threshold: float = 80.0,
+        tags: Optional[Dict[str, str]] = None,
+        instance_ids: Optional[List[str]] = None,
+        period: int = 300,
+        duration_minutes: int = 60
+    ) -> Dict[str, Any]:
+        """
+        批量查询EC2实例CPU利用率并按阈值过滤
+
+        Args:
+            threshold: CPU利用率阈值（百分比，默认80）
+            tags: Tag过滤条件，如 {"业务": "电商平台"}
+            instance_ids: 指定实例ID列表（可选）
+            period: 统计周期（秒，默认300）
+            duration_minutes: 查询时长（分钟，默认60）
+
+        Returns:
+            高CPU实例列表，包含实例信息和CPU指标
+        """
+        try:
+            # 1. 获取EC2实例列表
+            instances_response = await self._list_ec2_instances_impl(
+                tags=tags,
+                instance_ids=instance_ids
+            )
+
+            if not instances_response.get("success"):
+                return instances_response
+
+            instances = instances_response.get("instances", [])
+
+            if not instances:
+                return {
+                    "success": True,
+                    "high_cpu_instances": [],
+                    "count": 0,
+                    "message": "No instances found matching criteria"
+                }
+
+            logger.info(f"Found {len(instances)} instances, querying CPU metrics...")
+
+            # 2. 批量查询CPU指标（并行）
+            import asyncio
+
+            async def get_instance_cpu(instance):
+                instance_id = instance["InstanceId"]
+
+                # 查询CPU指标
+                cpu_response = await self._get_metric_statistics_impl(
+                    namespace="AWS/EC2",
+                    metric_name="CPUUtilization",
+                    start_time=f"{duration_minutes}m",
+                    period=period,
+                    statistics=["Average", "Maximum"],
+                    dimensions=[{
+                        "Name": "InstanceId",
+                        "Value": instance_id
+                    }]
+                )
+
+                if not cpu_response.get("success"):
+                    logger.warning(f"Failed to get CPU for {instance_id}: {cpu_response.get('error')}")
+                    return None
+
+                datapoints = cpu_response.get("datapoints", [])
+
+                if not datapoints:
+                    logger.debug(f"No CPU data for {instance_id}")
+                    return None
+
+                # 计算平均CPU和最大CPU
+                avg_cpu = sum(dp.get("Average", 0) for dp in datapoints) / len(datapoints)
+                max_cpu = max(dp.get("Maximum", 0) for dp in datapoints)
+
+                return {
+                    "instance": instance,
+                    "instance_id": instance_id,
+                    "avg_cpu": round(avg_cpu, 2),
+                    "max_cpu": round(max_cpu, 2),
+                    "datapoints_count": len(datapoints),
+                    "cpu_datapoints": datapoints
+                }
+
+            # 并行查询所有实例的CPU
+            results = await asyncio.gather(
+                *[get_instance_cpu(inst) for inst in instances],
+                return_exceptions=True
+            )
+
+            # 3. 过滤高CPU实例
+            high_cpu_instances = []
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"Error querying CPU: {result}")
+                    continue
+
+                if result is None:
+                    continue
+
+                # 检查是否超过阈值
+                if result["avg_cpu"] >= threshold or result["max_cpu"] >= threshold:
+                    # 提取关键实例信息
+                    instance = result["instance"]
+                    tags_dict = {}
+                    for tag in instance.get("Tags", []):
+                        tags_dict[tag["Key"]] = tag["Value"]
+
+                    high_cpu_instances.append({
+                        "instance_id": result["instance_id"],
+                        "instance_type": instance.get("InstanceType"),
+                        "state": instance.get("State", {}).get("Name"),
+                        "tags": tags_dict,
+                        "avg_cpu_utilization": result["avg_cpu"],
+                        "max_cpu_utilization": result["max_cpu"],
+                        "datapoints_count": result["datapoints_count"],
+                        "cpu_datapoints": result["cpu_datapoints"]
+                    })
+
+            # 按平均CPU降序排序
+            high_cpu_instances.sort(key=lambda x: x["avg_cpu_utilization"], reverse=True)
+
+            logger.info(
+                f"Found {len(high_cpu_instances)} instances with CPU >= {threshold}% "
+                f"out of {len(instances)} total instances"
+            )
+
+            return {
+                "success": True,
+                "high_cpu_instances": high_cpu_instances,
+                "count": len(high_cpu_instances),
+                "total_instances_checked": len(instances),
+                "threshold": threshold,
+                "query_metadata": {
+                    "period_seconds": period,
+                    "duration_minutes": duration_minutes
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error in batch_get_ec2_cpu_with_threshold: {str(e)}")
             return {
                 "success": False,
                 "error": str(e)

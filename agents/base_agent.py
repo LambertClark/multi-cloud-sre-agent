@@ -15,6 +15,8 @@ class AgentResponse(BaseModel):
     data: Any = None
     error: Optional[str] = None
     metadata: Dict[str, Any] = {}
+    agent_name: Optional[str] = None
+    message: Optional[str] = None
 
 
 class BaseAgent(ABC):
