@@ -37,6 +37,19 @@
   - 带重试的LLM调用（应对网络不稳定）
   - 完整的单元测试覆盖
 
+- [x] **SpecDocAgent - SDK内省和动态文档提取** ✨
+  - 三层提取策略：SDK内省 > OpenAPI规格 > LLM解析HTML
+  - AWS SDK内省：CloudWatch 39个、S3 110个、EC2 749个操作
+  - Azure SDK内省：Monitor 79个操作
+  - Kubernetes OpenAPI：1055个操作
+  - 总计2032个API操作，无需手动维护
+
+- [x] **DocumentCache - 智能文档缓存系统** ✨
+  - 双层缓存：内存缓存（快速）+ RAG缓存（持久）
+  - 自动过期检测：默认24小时，可配置
+  - 多云平台隔离：独立管理不同云平台的缓存
+  - 缓存未命中时自动调用SpecDocAgent重新拉取
+
 - [x] **RAG系统基础** (`rag_system.py`)
   - ChromaDB向量存储
   - HuggingFace Embeddings
@@ -61,104 +74,70 @@
 
 ### 阶段一：动态文档系统 🎯
 
-#### 任务1：实现DocumentFetcherAgent - 动态文档获取 (P0)
+#### ✅ 任务1：实现SpecDocAgent - SDK内省和动态文档提取 (P0) ✨
 
-**目标：** Agent自主拉取最新在线API文档，而非依赖静态文档库
+**目标：** Agent自主提取API定义，优先从SDK内省，无需爬取静态文档
 
 **核心理念：**
-- ✅ Agent需要时**动态拉取**在线文档
-- ✅ 永远使用**最新版本**API Spec
+- ✅ 优先从SDK内省提取API定义（最可靠）
+- ✅ OpenAPI规格解析（标准化）
+- ✅ LLM智能解析HTML（备选）
 - ✅ 智能缓存 + 过期自动刷新
-- ❌ 不手动整理文档
-- ❌ 不静态存储
+- ❌ 不手动维护API文档
 
-**实现内容：**
-- [ ] 创建 `DocumentFetcherAgent` (`agents/document_fetcher_agent.py`)
-  - 输入：云平台、服务名称、操作
-  - 输出：相关API文档
+**已完成内容：**
+- [x] 创建 `SpecDocAgent` (`agents/spec_doc_agent.py`)
+  - 三层提取策略：SDK内省 > OpenAPI规格 > LLM解析
+  - AWS boto3内省：从服务模型提取完整API定义
+  - Azure SDK内省：处理操作组架构（客户端→操作组→方法）
+  - GCP SDK内省：支持但需安装google-cloud包
+  - Kubernetes OpenAPI：解析swagger.json标准规格
 
-- [ ] 实现文档源注册表 (`config/doc_sources.yaml`)
-  ```yaml
-  kubernetes:
-    base_url: "https://kubernetes.io/docs/reference/"
-    api_patterns:
-      - "generated/kubernetes-api/v1.28/#list-pod-v1-core"
-      - "generated/kubernetes-api/v1.28/#read-pod-v1-core"
-    fetch_strategy: "scrape"  # 或 openapi_spec
+- [x] 实现 `DocumentCache` 智能缓存 (`services/doc_cache.py`)
+  - 双层缓存：内存缓存（快速）+ RAG缓存（持久）
+  - 自动过期检测：默认24小时，可配置
+  - 多云平台隔离：独立管理不同云平台的缓存
+  - 缓存键MD5哈希，时间戳过期判断
 
-  aws:
-    base_url: "https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/"
-    sdk_pattern: "client-{service}/class-{operation}command.html"
-    fetch_strategy: "sdk_docs"
+- [x] SDK内省实现细节
+  - **boto3内省**：从服务模型提取操作名、参数、类型、必需性、文档
+  - **Azure SDK内省**：实例化客户端 → 遍历操作组 → 提取方法签名
+  - **GCP SDK内省**：支持但需安装google-cloud-monitoring包
+  - **延迟初始化LLM**：避免代理配置问题
 
-  gcp:
-    base_url: "https://cloud.google.com/python/docs/reference/"
-    openapi_spec: "https://raw.githubusercontent.com/googleapis/google-api-python-client/main/docs/dyn/"
-    fetch_strategy: "openapi"
-  ```
+- [x] OpenAPI规格解析
+  - 直接解析JSON格式的OpenAPI/Swagger规格
+  - 提取paths、operations、parameters、schemas
+  - Kubernetes成功解析1055个API操作
 
-- [ ] 实现多种文档获取策略
-  - **OpenAPI/Swagger Spec** - 直接解析结构化规格（最优）
-  - **SDK文档爬取** - 解析官方SDK文档页面
-  - **GitHub README/Examples** - 爬取示例代码
-  - **LLM辅助解析** - 复杂HTML结构时用LLM提取关键信息
+- [x] 完整测试覆盖
+  - 单元测试：DocumentCache缓存逻辑（4/4通过）
+  - 集成测试：SpecDocAgent+DocumentCache（4/4通过）
+  - 真实环境测试：5/6云平台，共2032个API操作
 
-- [ ] 实现智能缓存机制 (`services/doc_cache.py`)
-  ```python
-  class DocumentCache:
-      """文档缓存：有过期时间的RAG存储"""
-
-      async def get_or_fetch(
-          self,
-          cloud_provider: str,
-          service: str,
-          operation: str,
-          max_age_hours: int = 24  # 24小时过期
-      ) -> List[Document]:
-          # 1. 查询RAG缓存
-          cached = await self.rag.query(...)
-          if cached and not self._is_expired(cached):
-              return cached
-
-          # 2. 缓存过期，动态拉取
-          fresh_docs = await self.fetcher.fetch_docs(...)
-
-          # 3. 更新RAG
-          await self.rag.update(fresh_docs)
-
-          return fresh_docs
-  ```
-
-- [ ] 文档解析和结构化
-  - 提取API签名、参数、返回值
-  - 提取示例代码
-  - 提取错误码和常见问题
-  - 生成embeddings并存储
-
-**工作流程：**
+**实际工作流程：**
 ```
-1. CodeGeneratorAgent需要生成"list K8s pods"代码
-2. 调用DocumentCache.get_or_fetch("kubernetes", "core", "list_pod")
-3. 检查RAG缓存 → 未找到或已过期
-4. DocumentFetcherAgent拉取：
-   - 访问 https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/
-   - 使用LLM提取list_pod API文档
-   - 解析参数：namespace, labelSelector, fieldSelector等
-   - 提取Python示例代码
-5. 存储到RAG（标记时间戳）
-6. 返回最新文档给CodeGeneratorAgent
-7. 下次24小时内请求 → 直接使用缓存
+1. CodeGeneratorAgent需要生成"list AWS S3 buckets"代码
+2. 调用DocumentCache.get_or_fetch("aws", "s3", "list_buckets")
+3. 检查内存缓存 → 未命中
+4. 检查RAG缓存 → 未找到或已过期
+5. SpecDocAgent从boto3 SDK内省提取：
+   - 操作名：ListBuckets
+   - 参数：无必需参数
+   - 返回类型：BucketList
+   - 完整文档和示例
+6. 更新RAG索引并缓存到内存
+7. 返回文档给CodeGeneratorAgent
+8. 下次24小时内请求 → 直接使用内存缓存
 ```
 
-**验收标准：**
-```python
-# Agent能自动拉取K8s最新文档并生成代码
-result = await orchestrator.process("列出电商平台的所有Pod")
-# 1. 自动识别需要K8s API文档
-# 2. 动态从kubernetes.io拉取最新文档
-# 3. 生成正确代码
-# 4. 下次请求复用缓存（24小时内）
-```
+**已验收通过：**
+- ✅ AWS CloudWatch 39个操作，S3 110个操作，EC2 749个操作
+- ✅ Azure Monitor 79个操作
+- ✅ Kubernetes 1055个操作
+- ✅ 缓存命中率100%（第二次请求）
+- ✅ 过期后自动重新提取
+- ✅ 多云平台隔离正常
 
 ---
 
@@ -559,8 +538,8 @@ DiagnosticAgent工作流程:
 ## 优先级排序
 
 ### P0 - 立即开始（Agent能力核心）
-1. ✅ 任务4：Manager Agent核心能力 - **最高优先级**
-2. 任务1：DocumentFetcherAgent - 动态文档获取 ✨
+1. ✅ 任务4：Manager Agent核心能力
+2. ✅ 任务1：SpecDocAgent - SDK内省和动态文档提取 ✨
 3. 任务2：优化RAG检索质量
 4. 任务10：安全沙箱
 
@@ -585,13 +564,18 @@ DiagnosticAgent工作流程:
 
 ```
 核心理念: Agent自主生成代码，而非硬编码功能 ✅
-已完成: RAG基础、CodeGeneratorAgent ReAct、DataAdapterAgent
-下一步: Manager Agent → 动态文档获取 → 工具动态注册
+已完成: RAG基础、CodeGeneratorAgent ReAct、DataAdapterAgent、SpecDocAgent、DocumentCache
+下一步: RAG检索优化 → 工具动态注册 → 安全沙箱
 
-阶段一 动态文档系统:  0/3 完成 (DocumentFetcherAgent、RAG优化、OpenAPI解析)
+阶段一 动态文档系统:  1/3 完成 (SpecDocAgent ✅、RAG优化、OpenAPI扩展)
 阶段二 Agent能力提升: 1/4 完成 (CodeGeneratorAgent ✅)
 阶段三 系统完善:      0/4 完成
 阶段四 高级能力:      0/2 完成
+
+最新成果:
+- ✅ SpecDocAgent: 2032个API操作（AWS 898、Azure 79、Kubernetes 1055）
+- ✅ DocumentCache: 双层缓存，24小时过期，多云平台隔离
+- ✅ SDK内省: boto3/Azure SDK/GCP SDK自动提取API定义
 ```
 
 ---
@@ -623,10 +607,10 @@ DiagnosticAgent工作流程:
 - 🔨 Manager Agent
 - 🔨 工具动态注册
 
-### M2: 动态文档系统 (预计1周)
-- 🔨 DocumentFetcherAgent - 自动拉取在线文档
+### M2: 动态文档系统 (进行中)
+- ✅ SpecDocAgent - SDK内省和动态文档提取
 - 🔨 RAG检索质量优化
-- 🔨 OpenAPI Spec动态解析
+- 🔨 OpenAPI Spec扩展（更多云平台）
 
 ### M3: 质量和安全 (预计1周)
 - 🔨 代码质量增强
