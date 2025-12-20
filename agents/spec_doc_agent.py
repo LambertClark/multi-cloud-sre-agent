@@ -1,6 +1,7 @@
 """
 SpecDoc Agent - API规格文档拉取Agent
-负责从云服务官方文档拉取API规格
+负责从云服务SDK或规格文档中提取API定义
+策略：SDK内省 > OpenAPI规格 > LLM解析HTML
 """
 from typing import Dict, Any, List, Optional
 import aiohttp
@@ -10,9 +11,11 @@ import json
 import logging
 from urllib.parse import urljoin, urlparse
 import re
+import inspect
 
 from .base_agent import BaseAgent, AgentResponse
 from config import get_config
+from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -20,26 +23,36 @@ logger = logging.getLogger(__name__)
 class SpecDocAgent(BaseAgent):
     """
     SpecDoc Agent负责：
-    1. 从云服务官方文档网站拉取API规格文档
-    2. 解析OpenAPI/Swagger规格
-    3. 提取API操作、参数、响应格式、示例代码
+    1. 从云SDK中内省提取API定义（优先）
+    2. 从OpenAPI/Swagger规格中解析
+    3. 使用LLM解析HTML文档（备选）
     """
 
-    # 云平台文档URL映射
-    DOC_URLS = {
+    # SDK客户端映射 - 通过内省SDK提取API（优先级最高）
+    # 注意：GCP需要安装 google-cloud-monitoring 包
+    SDK_CLIENTS = {
         "aws": {
-            "cloudwatch": "https://docs.aws.amazon.com/cloudwatch/",
-            "logs": "https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/",
-            "xray": "https://docs.aws.amazon.com/xray/",
-            "api_reference": "https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/"
+            "cloudwatch": {"service": "cloudwatch", "module": "boto3"},
+            "ec2": {"service": "ec2", "module": "boto3"},
+            "s3": {"service": "s3", "module": "boto3"},
+            "logs": {"service": "logs", "module": "boto3"}
         },
         "azure": {
-            "monitor": "https://learn.microsoft.com/en-us/azure/azure-monitor/",
-            "api_reference": "https://learn.microsoft.com/en-us/rest/api/monitor/"
+            "monitor": {"module": "azure.mgmt.monitor", "class": "MonitorManagementClient"},
+            "compute": {"module": "azure.mgmt.compute", "class": "ComputeManagementClient"}
         },
         "gcp": {
-            "monitoring": "https://cloud.google.com/monitoring/docs",
-            "api_reference": "https://cloud.google.com/monitoring/api/ref_v3/rest"
+            # GCP SDK需要单独安装: pip install google-cloud-monitoring
+            "monitoring": {"module": "google.cloud.monitoring_v3", "class": "MetricServiceClient"}
+        }
+    }
+
+    # OpenAPI规格URL映射（备选方案）
+    DOC_URLS = {
+        "kubernetes": {
+            "core": [
+                "https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json"
+            ]
         }
     }
 
@@ -47,6 +60,19 @@ class SpecDocAgent(BaseAgent):
         super().__init__("SpecDocAgent", config)
         self.config_obj = get_config()
         self.session: Optional[aiohttp.ClientSession] = None
+        self._llm: Optional[ChatOpenAI] = None  # 延迟初始化
+
+    @property
+    def llm(self) -> ChatOpenAI:
+        """延迟初始化LLM（只在需要时创建）"""
+        if self._llm is None:
+            self._llm = ChatOpenAI(
+                model="moonshotai/Kimi-K2-Instruct-0905",
+                temperature=0,
+                base_url=self.config_obj.llm.base_url,
+                api_key=self.config_obj.llm.api_key
+            )
+        return self._llm
 
     def get_capabilities(self) -> List[str]:
         """获取Agent能力"""
@@ -84,17 +110,22 @@ class SpecDocAgent(BaseAgent):
             service = input_data.get("service") or input_data.get("service_name", "")
             doc_type = input_data.get("doc_type", "api_reference")
 
-            # 获取文档URL
-            doc_urls = self._get_doc_urls(cloud_provider, service, doc_type)
+            specs = {"operations": [], "schemas": {}, "examples": []}
+            source = "unknown"
 
-            if not doc_urls:
-                return AgentResponse(
-                    success=False,
-                    error=f"No documentation URLs found for {cloud_provider}.{service}"
-                )
-
-            # 拉取文档
-            specs = await self._fetch_specifications(doc_urls, cloud_provider, service)
+            # 策略1：优先尝试从SDK提取API定义
+            sdk_specs = await self._extract_from_sdk(cloud_provider, service)
+            if sdk_specs and sdk_specs.get("operations"):
+                specs = sdk_specs
+                source = "sdk_introspection"
+                logger.info(f"成功从SDK提取 {len(specs['operations'])} 个API操作")
+            else:
+                # 策略2：尝试从OpenAPI规格拉取
+                doc_urls = self._get_doc_urls(cloud_provider, service, doc_type)
+                if doc_urls:
+                    specs = await self._fetch_specifications(doc_urls, cloud_provider, service)
+                    source = "openapi_spec"
+                    logger.info(f"从OpenAPI规格拉取 {len(specs.get('operations', []))} 个API操作")
 
             return AgentResponse(
                 success=True,
@@ -102,10 +133,10 @@ class SpecDocAgent(BaseAgent):
                     "cloud_provider": cloud_provider,
                     "service": service,
                     "specifications": specs,
-                    "doc_urls": doc_urls
+                    "source": source
                 },
                 metadata={
-                    "urls_fetched": len(doc_urls),
+                    "source": source,
                     "operations_found": len(specs.get("operations", []))
                 }
             )
@@ -130,13 +161,287 @@ class SpecDocAgent(BaseAgent):
 
         # 尝试获取特定服务的URL
         if service in provider_docs:
-            urls.append(provider_docs[service])
-
-        # 添加API参考URL
-        if doc_type == "api_reference" and "api_reference" in provider_docs:
-            urls.append(provider_docs["api_reference"])
+            service_urls = provider_docs[service]
+            # 处理列表或单个URL
+            if isinstance(service_urls, list):
+                urls.extend(service_urls)
+            else:
+                urls.append(service_urls)
 
         return urls
+
+    async def _extract_from_sdk(
+        self,
+        cloud_provider: str,
+        service: str
+    ) -> Optional[Dict[str, Any]]:
+        """从云SDK中提取API定义"""
+        try:
+            # 检查是否有SDK配置
+            provider_sdks = self.SDK_CLIENTS.get(cloud_provider, {})
+            sdk_config = provider_sdks.get(service)
+
+            if not sdk_config:
+                logger.debug(f"没有找到 {cloud_provider}.{service} 的SDK配置")
+                return None
+
+            # 根据云平台类型提取API
+            if cloud_provider == "aws":
+                return await self._extract_from_boto3(sdk_config)
+            elif cloud_provider == "azure":
+                return await self._extract_from_azure_sdk(sdk_config)
+            elif cloud_provider == "gcp":
+                return await self._extract_from_gcp_sdk(sdk_config)
+            else:
+                return None
+
+        except Exception as e:
+            logger.warning(f"从SDK提取API失败 {cloud_provider}.{service}: {e}")
+            return None
+
+    async def _extract_from_boto3(self, sdk_config: Dict[str, str]) -> Dict[str, Any]:
+        """从boto3客户端提取API操作"""
+        try:
+            import boto3
+            from botocore.exceptions import NoRegionError
+
+            service_name = sdk_config["service"]
+
+            # 创建客户端（使用默认region或配置的region）
+            try:
+                client = boto3.client(service_name, region_name='us-east-1')
+            except NoRegionError:
+                client = boto3.client(service_name)
+
+            # 获取服务模型
+            service_model = client._service_model
+
+            operations = []
+
+            # 遍历所有操作
+            for operation_name in service_model.operation_names:
+                operation_model = service_model.operation_model(operation_name)
+
+                # 提取参数信息
+                parameters = []
+                if operation_model.input_shape:
+                    input_shape = operation_model.input_shape
+                    for member_name, member_shape in input_shape.members.items():
+                        parameters.append({
+                            "name": member_name,
+                            "type": member_shape.type_name,
+                            "required": member_name in input_shape.required_members,
+                            "description": member_shape.documentation or ""
+                        })
+
+                operations.append({
+                    "name": operation_name,
+                    "description": operation_model.documentation or f"AWS {service_name} {operation_name} operation",
+                    "parameters": parameters,
+                    "service": service_name,
+                    "method": "POST",  # AWS API通常使用POST
+                    "path": f"/{operation_name}"
+                })
+
+            logger.info(f"从boto3提取了 {len(operations)} 个操作")
+
+            return {
+                "operations": operations,
+                "schemas": {},
+                "examples": []
+            }
+
+        except ImportError:
+            logger.warning("boto3未安装，无法从AWS SDK提取API")
+            return None
+        except Exception as e:
+            logger.error(f"从boto3提取API失败: {e}")
+            return None
+
+    async def _extract_from_azure_sdk(self, sdk_config: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        """从Azure SDK提取API操作"""
+        try:
+            module_name = sdk_config["module"]
+            class_name = sdk_config["class"]
+
+            # 动态导入Azure SDK模块
+            import importlib
+            from unittest.mock import MagicMock
+
+            module = importlib.import_module(module_name)
+            client_class = getattr(module, class_name)
+
+            # Azure SDK需要实例化客户端才能访问操作组
+            # 使用Mock凭证创建客户端实例
+            mock_credential = MagicMock()
+            mock_subscription = "mock-subscription-id"
+
+            try:
+                client = client_class(
+                    credential=mock_credential,
+                    subscription_id=mock_subscription
+                )
+            except TypeError:
+                # 如果不需要subscription_id
+                client = client_class(credential=mock_credential)
+
+            operations = []
+
+            # 遍历客户端的操作组属性
+            for attr_name in dir(client):
+                if attr_name.startswith('_') or attr_name == 'close':
+                    continue
+
+                attr = getattr(client, attr_name)
+
+                # 跳过非操作组（如models等）
+                if not hasattr(attr, '__class__') or 'operations' not in attr.__class__.__module__.lower():
+                    continue
+
+                # 遍历操作组的方法
+                for method_name in dir(attr):
+                    if method_name.startswith('_'):
+                        continue
+
+                    method = getattr(attr, method_name)
+
+                    if not callable(method):
+                        continue
+
+                    # 尝试获取方法签名
+                    try:
+                        sig = inspect.signature(method)
+                        parameters = []
+
+                        for param_name, param in sig.parameters.items():
+                            if param_name in ['self', 'cls']:
+                                continue
+
+                            parameters.append({
+                                "name": param_name,
+                                "type": str(param.annotation) if param.annotation != inspect.Parameter.empty else "any",
+                                "required": param.default == inspect.Parameter.empty,
+                                "description": ""
+                            })
+
+                        # 提取文档字符串
+                        doc = inspect.getdoc(method) or f"Azure {attr_name} {method_name} operation"
+
+                        operations.append({
+                            "name": f"{attr_name}.{method_name}",
+                            "description": doc[:200],
+                            "parameters": parameters,
+                            "service": module_name.split('.')[-1],
+                            "method": "POST",
+                            "path": f"/{attr_name}/{method_name}"
+                        })
+                    except Exception as e:
+                        continue
+
+            logger.info(f"从Azure SDK提取了 {len(operations)} 个操作")
+
+            return {
+                "operations": operations,
+                "schemas": {},
+                "examples": []
+            }
+
+        except ImportError as e:
+            logger.warning(f"Azure SDK未安装或模块不存在 ({module_name}): {e}")
+            return None
+        except Exception as e:
+            logger.error(f"从Azure SDK提取API失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    async def _extract_from_gcp_sdk(self, sdk_config: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        """从GCP SDK提取API操作"""
+        try:
+            module_name = sdk_config["module"]
+            class_name = sdk_config["class"]
+
+            # 动态导入GCP SDK模块
+            import importlib
+            module = importlib.import_module(module_name)
+            client_class = getattr(module, class_name)
+
+            # 获取客户端类的所有公共方法
+            operations = []
+
+            for method_name in dir(client_class):
+                # 跳过私有方法和特殊方法
+                if method_name.startswith('_'):
+                    continue
+
+                method = getattr(client_class, method_name)
+
+                # 只处理可调用的方法
+                if not callable(method):
+                    continue
+
+                # 跳过非API操作的方法
+                skip_methods = [
+                    'close', 'from_service_account_file', 'from_service_account_json',
+                    'get_mtls_endpoint_and_cert_source', 'get_transport_class',
+                    'parse_common_billing_account_path', 'parse_common_folder_path',
+                    'parse_common_location_path', 'parse_common_organization_path',
+                    'parse_common_project_path', 'common_billing_account_path',
+                    'common_folder_path', 'common_location_path', 'common_organization_path',
+                    'common_project_path'
+                ]
+
+                if method_name in skip_methods or 'parse_' in method_name or '_path' in method_name:
+                    continue
+
+                # 尝试获取方法签名
+                try:
+                    sig = inspect.signature(method)
+                    parameters = []
+
+                    for param_name, param in sig.parameters.items():
+                        # 跳过self和cls
+                        if param_name in ['self', 'cls']:
+                            continue
+
+                        parameters.append({
+                            "name": param_name,
+                            "type": str(param.annotation) if param.annotation != inspect.Parameter.empty else "any",
+                            "required": param.default == inspect.Parameter.empty,
+                            "description": ""
+                        })
+
+                    # 提取文档字符串
+                    doc = inspect.getdoc(method) or f"GCP {module_name} {method_name} operation"
+
+                    operations.append({
+                        "name": method_name,
+                        "description": doc[:200],  # 限制描述长度
+                        "parameters": parameters,
+                        "service": module_name.split('.')[-1],
+                        "method": "POST",
+                        "path": f"/{method_name}"
+                    })
+                except Exception as e:
+                    # 如果无法获取签名，跳过这个方法
+                    continue
+
+            logger.info(f"从GCP SDK提取了 {len(operations)} 个操作")
+
+            return {
+                "operations": operations,
+                "schemas": {},
+                "examples": []
+            }
+
+        except ImportError as e:
+            logger.warning(f"GCP SDK未安装或模块不存在 ({module_name}): {e}")
+            return None
+        except Exception as e:
+            logger.error(f"从GCP SDK提取API失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     async def _fetch_specifications(
         self,
@@ -185,6 +490,28 @@ class SpecDocAgent(BaseAgent):
 
     async def _try_fetch_openapi(self, base_url: str) -> Optional[Dict[str, Any]]:
         """尝试获取OpenAPI规格文档"""
+        # 如果URL本身就指向JSON文件，直接尝试拉取
+        if base_url.endswith('.json') or 'swagger' in base_url.lower() or 'openapi' in base_url.lower():
+            try:
+                async with self.session.get(base_url, timeout=30) as response:
+                    if response.status == 200:
+                        text = await response.text()
+                        logger.info(f"成功拉取文档: {base_url}, 大小: {len(text)} 字符")
+                        spec = json.loads(text)
+
+                        # 验证是否是有效的OpenAPI/Swagger规格
+                        if 'paths' in spec or 'swagger' in spec or 'openapi' in spec:
+                            logger.info(f"成功解析OpenAPI规格，路径数: {len(spec.get('paths', {}))}")
+                            return spec
+                        else:
+                            logger.warning(f"JSON文件不是有效的OpenAPI规格")
+                    else:
+                        logger.warning(f"HTTP {response.status}: {base_url}")
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON解析失败 {base_url}: {e}")
+            except Exception as e:
+                logger.error(f"拉取OpenAPI规格失败 {base_url}: {type(e).__name__}: {e}")
+
         # 常见的OpenAPI规格路径
         openapi_paths = [
             "/openapi.json",
@@ -198,7 +525,9 @@ class SpecDocAgent(BaseAgent):
                 url = urljoin(base_url, path)
                 async with self.session.get(url, timeout=10) as response:
                     if response.status == 200:
-                        return await response.json()
+                        spec = await response.json()
+                        logger.info(f"成功拉取OpenAPI规格: {url}")
+                        return spec
             except:
                 continue
 
@@ -210,7 +539,7 @@ class SpecDocAgent(BaseAgent):
         cloud_provider: str,
         service: str
     ) -> Dict[str, Any]:
-        """解析HTML文档"""
+        """使用LLM智能解析HTML文档"""
         try:
             async with self.session.get(url, timeout=30) as response:
                 if response.status != 200:
@@ -219,122 +548,106 @@ class SpecDocAgent(BaseAgent):
                 html = await response.text()
                 soup = BeautifulSoup(html, 'lxml')
 
-                # 根据云平台使用不同的解析策略
-                if cloud_provider == "aws":
-                    return self._parse_aws_docs(soup, service)
-                elif cloud_provider == "azure":
-                    return self._parse_azure_docs(soup, service)
-                elif cloud_provider == "gcp":
-                    return self._parse_gcp_docs(soup, service)
+                # 提取主要文本内容（去除脚本、样式等）
+                for script in soup(["script", "style", "nav", "footer", "header"]):
+                    script.decompose()
 
-                return {}
+                text_content = soup.get_text()
+
+                # 限制文本长度（LLM输入限制）
+                max_chars = 50000
+                if len(text_content) > max_chars:
+                    text_content = text_content[:max_chars] + "\n\n[文档内容过长，已截断]"
+
+                # 使用LLM解析文档
+                return await self._llm_parse_docs(text_content, cloud_provider, service, url)
 
         except Exception as e:
             logger.error(f"Error parsing HTML docs from {url}: {str(e)}")
             return {}
 
-    def _parse_aws_docs(self, soup: BeautifulSoup, service: str) -> Dict[str, Any]:
-        """解析AWS文档"""
-        operations = []
-        examples = []
+    async def _llm_parse_docs(
+        self,
+        text_content: str,
+        cloud_provider: str,
+        service: str,
+        url: str
+    ) -> Dict[str, Any]:
+        """使用LLM解析文档内容提取API规格"""
+        try:
+            prompt = f"""你是一个API文档解析专家。请从以下{cloud_provider}云平台的{service}服务文档中提取API操作信息。
 
-        # 查找API操作
-        api_sections = soup.find_all(['h2', 'h3'], class_=re.compile('api|operation'))
+文档URL: {url}
 
-        for section in api_sections:
-            operation_name = section.get_text().strip()
+文档内容：
+{text_content}
 
-            # 查找参数表格
-            parameters = []
-            next_element = section.find_next_sibling()
+请提取以下信息并以JSON格式返回（必须严格遵守JSON格式）：
+{{
+    "operations": [
+        {{
+            "name": "API操作名称",
+            "description": "操作描述",
+            "method": "HTTP方法(GET/POST/PUT/DELETE等)",
+            "path": "API路径或端点",
+            "parameters": [
+                {{
+                    "name": "参数名",
+                    "type": "参数类型",
+                    "required": true/false,
+                    "description": "参数描述"
+                }}
+            ]
+        }}
+    ],
+    "examples": [
+        {{
+            "operation": "操作名称",
+            "code": "示例代码"
+        }}
+    ]
+}}
 
-            while next_element and next_element.name != section.name:
-                if next_element.name == 'table':
-                    parameters.extend(self._extract_parameters_from_table(next_element))
-                next_element = next_element.find_next_sibling()
+要求：
+1. 只提取API操作相关的信息，忽略导航、介绍等内容
+2. 至少提取3-5个主要API操作
+3. 参数信息要尽可能完整
+4. 如果有示例代码，一定要提取
+5. **返回纯JSON，不要包含任何markdown代码块标记（不要```json）**
+6. 如果文档中没有明确的API操作，返回空的operations列表
+"""
 
-            # 查找示例代码
-            code_blocks = section.find_next_siblings('pre', limit=3)
-            for code in code_blocks:
-                examples.append({
-                    "operation": operation_name,
-                    "code": code.get_text().strip()
-                })
+            # 调用LLM（使用异步方法）
+            response = await self.llm.ainvoke(prompt)
 
-            operations.append({
-                "name": operation_name,
-                "service": service,
-                "parameters": parameters,
-                "description": self._extract_description(section)
-            })
+            # 解析LLM响应
+            response_text = response.content.strip()
 
-        return {
-            "operations": operations,
-            "examples": examples
-        }
+            # 移除可能的markdown代码块标记
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]
+            if response_text.startswith("```"):
+                response_text = response_text[3:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
 
-    def _parse_azure_docs(self, soup: BeautifulSoup, service: str) -> Dict[str, Any]:
-        """解析Azure文档"""
-        # Azure文档解析逻辑
-        operations = []
+            response_text = response_text.strip()
 
-        # Azure使用不同的HTML结构
-        api_sections = soup.find_all('div', class_=re.compile('api-operation'))
+            # 解析JSON
+            try:
+                result = json.loads(response_text)
+                logger.info(f"LLM成功解析文档，提取了 {len(result.get('operations', []))} 个API操作")
+                return result
+            except json.JSONDecodeError as e:
+                logger.error(f"LLM响应不是有效的JSON: {e}")
+                logger.error(f"响应内容: {response_text[:500]}")
+                return {"operations": [], "examples": []}
 
-        for section in api_sections:
-            operation_name = section.find('h3')
-            if operation_name:
-                operations.append({
-                    "name": operation_name.get_text().strip(),
-                    "service": service,
-                    "parameters": [],
-                    "description": ""
-                })
-
-        return {"operations": operations, "examples": []}
-
-    def _parse_gcp_docs(self, soup: BeautifulSoup, service: str) -> Dict[str, Any]:
-        """解析GCP文档"""
-        # GCP文档解析逻辑
-        operations = []
-
-        api_sections = soup.find_all('div', class_='method')
-
-        for section in api_sections:
-            method_name = section.find('h4')
-            if method_name:
-                operations.append({
-                    "name": method_name.get_text().strip(),
-                    "service": service,
-                    "parameters": [],
-                    "description": ""
-                })
-
-        return {"operations": operations, "examples": []}
-
-    def _extract_parameters_from_table(self, table) -> List[Dict[str, Any]]:
-        """从表格中提取参数信息"""
-        parameters = []
-
-        rows = table.find_all('tr')[1:]  # 跳过表头
-        for row in rows:
-            cols = row.find_all(['td', 'th'])
-            if len(cols) >= 2:
-                parameters.append({
-                    "name": cols[0].get_text().strip(),
-                    "type": cols[1].get_text().strip() if len(cols) > 1 else "",
-                    "description": cols[2].get_text().strip() if len(cols) > 2 else "",
-                    "required": "required" in row.get_text().lower()
-                })
-
-        return parameters
-
-    def _extract_description(self, element) -> str:
-        """提取描述信息"""
-        next_p = element.find_next('p')
-        if next_p:
-            return next_p.get_text().strip()
-        return ""
+        except Exception as e:
+            logger.error(f"LLM解析文档失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"operations": [], "examples": []}
 
     def _merge_openapi_spec(self, target: Dict[str, Any], openapi_spec: Dict[str, Any]):
         """合并OpenAPI规格到目标规格"""
