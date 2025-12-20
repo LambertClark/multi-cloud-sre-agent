@@ -31,3 +31,6 @@ result.json
 .vscode/
 .idea/
 *.swp
+
+# Claude collaboration rules (local only)
+CLAUDE.md
