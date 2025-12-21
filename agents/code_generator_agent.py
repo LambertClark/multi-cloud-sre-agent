@@ -17,6 +17,10 @@ from pathlib import Path
 from .base_agent import BaseAgent, AgentResponse
 from config import get_config
 from rag_system import get_rag_system
+from services.code_quality import CodeQualityAnalyzer
+from services.code_templates import CodeTemplateLibrary
+from services.test_generator import TestGenerator
+from services.code_reviewer import CodeReviewer
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,12 @@ class CodeGeneratorAgent(BaseAgent):
         self.llm = self._init_llm()
         self.rag_system = get_rag_system()
         self.max_react_iterations = 3  # ReAct最大迭代次数
+
+        # 代码质量工具
+        self.quality_analyzer = CodeQualityAnalyzer(enable_mypy=False)
+        self.template_library = CodeTemplateLibrary()
+        self.test_generator = TestGenerator()
+        self.code_reviewer = CodeReviewer()
 
     def _init_llm(self) -> ChatOpenAI:
         """初始化LLM（配置更长的超时时间以应对网络不稳定）"""
@@ -146,6 +156,29 @@ class CodeGeneratorAgent(BaseAgent):
                 specifications=specifications
             )
 
+            # 代码质量检查和审查（仅Python）
+            quality_result = None
+            review_result = None
+
+            if language == "python":
+                try:
+                    # 1. 代码质量分析
+                    logger.info("执行代码质量分析...")
+                    quality_result = self.quality_analyzer.analyze(code)
+
+                    # 2. 代码审查
+                    logger.info("执行代码审查...")
+                    review_result = self.code_reviewer.review(code)
+
+                    # 记录结果
+                    logger.info(
+                        f"质量分数: {quality_result.get('quality_score', 0):.1f}, "
+                        f"审查分数: {review_result.score:.1f}"
+                    )
+
+                except Exception as e:
+                    logger.warning(f"代码质量检查失败: {e}")
+
             return AgentResponse(
                 success=True,
                 data={
@@ -153,11 +186,15 @@ class CodeGeneratorAgent(BaseAgent):
                     "language": language,
                     "operation": operation,
                     "cloud_provider": cloud_provider,
-                    "service": service
+                    "service": service,
+                    "quality_analysis": quality_result,
+                    "review_result": review_result
                 },
                 metadata={
                     "rag_results_used": len(rag_results.get("results", [])),
-                    "code_length": len(code)
+                    "code_length": len(code),
+                    "quality_score": quality_result.get("quality_score", 0) if quality_result else 0,
+                    "review_score": review_result.score if review_result else 0
                 }
             )
 
@@ -287,13 +324,17 @@ class CodeGeneratorAgent(BaseAgent):
 
 要求：
 1. 代码必须完整可运行
-2. 包含完整的错误处理
+2. 包含完整的错误处理（使用try-except捕获异常）
 3. 添加清晰的注释和文档
 4. 遵循最佳实践和编码规范
-5. 处理边界情况
+5. 处理边界情况（空值、空列表等）
 6. 包含必要的导入语句
 7. 添加类型提示（如果语言支持）
 8. 生成的代码应该易于理解和维护
+9. 对于AWS API调用，优先使用paginator处理分页
+10. 添加重试机制处理临时错误
+11. 使用logging记录关键信息（不要使用print）
+12. 确保资源正确清理（使用with语句或finally块）
 """
 
         if retry_context:
@@ -458,7 +499,7 @@ IMPORTANT - 这是一次重试生成：
         operation: str
     ) -> AgentResponse:
         """
-        生成测试代码
+        生成测试代码（使用TestGenerator自动生成）
 
         Args:
             main_code: 主代码
@@ -469,6 +510,23 @@ IMPORTANT - 这是一次重试生成：
             测试代码
         """
         try:
+            # 优先使用TestGenerator自动生成（仅Python）
+            if language == "python":
+                logger.info("使用TestGenerator自动生成测试")
+                test_code = self.test_generator.generate_tests(main_code)
+
+                if test_code:
+                    return AgentResponse(
+                        success=True,
+                        data={
+                            "test_code": test_code,
+                            "language": language,
+                            "generator": "automatic"
+                        }
+                    )
+
+            # 回退到LLM生成（其他语言或自动生成失败）
+            logger.info("使用LLM生成测试")
             system_prompt = f"""你是一个测试代码生成专家。请为给定的代码生成完整的单元测试。
 
 要求：
@@ -478,6 +536,7 @@ IMPORTANT - 这是一次重试生成：
 4. 测试错误处理
 5. 使用Mock模拟外部API调用
 6. 包含清晰的测试描述
+7. 目标代码覆盖率 >80%
 """
 
             user_prompt = f"""请为以下{language}代码生成单元测试：
@@ -503,7 +562,8 @@ IMPORTANT - 这是一次重试生成：
                 success=True,
                 data={
                     "test_code": test_code,
-                    "language": language
+                    "language": language,
+                    "generator": "llm"
                 }
             )
 
@@ -567,6 +627,56 @@ IMPORTANT - 这是一次重试生成：
                 success=False,
                 error=str(e)
             )
+
+    def get_relevant_templates(
+        self,
+        cloud_provider: str,
+        operation: str
+    ) -> List[Dict[str, Any]]:
+        """
+        获取相关的代码模板
+
+        Args:
+            cloud_provider: 云平台
+            operation: 操作名称
+
+        Returns:
+            相关模板列表
+        """
+        from services.code_templates import CloudProvider
+
+        # 映射云平台名称
+        provider_map = {
+            'aws': CloudProvider.AWS,
+            'azure': CloudProvider.AZURE,
+            'gcp': CloudProvider.GCP,
+            'kubernetes': CloudProvider.KUBERNETES,
+            'k8s': CloudProvider.KUBERNETES,
+            'volcengine': CloudProvider.VOLCENGINE
+        }
+
+        provider_enum = provider_map.get(cloud_provider.lower())
+        if not provider_enum:
+            return []
+
+        # 搜索相关模板
+        templates = self.template_library.search_templates(
+            cloud_provider=provider_enum,
+            keyword=operation
+        )
+
+        # 转换为字典格式
+        return [
+            {
+                'name': t.name,
+                'description': t.description,
+                'code': t.code_template,
+                'example': t.example,
+                'best_practices': t.best_practices,
+                'common_pitfalls': t.common_pitfalls
+            }
+            for t in templates[:3]  # 最多返回3个模板
+        ]
 
     async def process_with_react(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
