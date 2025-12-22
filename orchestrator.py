@@ -9,12 +9,13 @@ from datetime import datetime
 
 from agents import ManagerAgent, SpecDocAgent, CodeGeneratorAgent
 from agents.task_planner_agent import get_task_planner
-from tools import CloudToolRegistry, AWSMonitoringTools
+from tools import CloudToolRegistry, AWSMonitoringTools, AzureMonitoringTools
 from tools.cloud_tools import get_tool_registry
 from rag_system import get_rag_system
 from wasm_sandbox import get_sandbox
 from task_executor import get_task_executor
 from config import get_config
+from services.conversation_manager import ConversationManager, MessageRole, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,9 @@ class MultiCloudOrchestrator:
         self.sandbox = get_sandbox()
         self.tool_registry = get_tool_registry()
 
+        # 初始化对话管理器
+        self.conversation_manager = ConversationManager()
+
         # 初始化云工具
         self._init_cloud_tools()
 
@@ -56,17 +60,20 @@ class MultiCloudOrchestrator:
         self._cloud_docs_loaded = False
         self._cloud_docs_loading = False
 
-        logger.info("MultiCloudOrchestrator initialized")
+        logger.info("MultiCloudOrchestrator initialized with conversation management")
 
     def _init_cloud_tools(self):
         """初始化云服务工具"""
         # 初始化AWS工具
         aws_tools = AWSMonitoringTools()
 
+        # 初始化Azure工具
+        azure_tools = AzureMonitoringTools()
+
         # 注册工具到Manager Agent
         self._register_tools_with_manager()
 
-        logger.info("Cloud tools initialized")
+        logger.info("Cloud tools initialized (AWS, Azure)")
 
     def _register_tools_with_manager(self):
         """向Manager Agent注册已有的API"""
@@ -86,6 +93,24 @@ class MultiCloudOrchestrator:
         self.manager_agent.register_api(
             "aws", "xray",
             ["get_trace_summaries", "get_service_graph"]
+        )
+
+        # Azure Monitor
+        self.manager_agent.register_api(
+            "azure", "monitor",
+            ["get_metric_statistics", "list_metrics", "create_metric_alert", "list_alert_rules"]
+        )
+
+        # Azure Logs
+        self.manager_agent.register_api(
+            "azure", "logs",
+            ["query_logs", "list_workspaces"]
+        )
+
+        # Azure Application Insights
+        self.manager_agent.register_api(
+            "azure", "appinsights",
+            ["query_traces", "query_dependencies"]
         )
 
     async def _ensure_cloud_docs_loaded(self):
@@ -122,13 +147,21 @@ class MultiCloudOrchestrator:
         finally:
             self._cloud_docs_loading = False
 
-    async def process_request(self, user_query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def process_request(
+        self,
+        user_query: str,
+        context: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         处理用户请求
 
         Args:
             user_query: 用户查询
             context: 可选上下文
+            session_id: 可选会话ID，如果不提供则创建新会话
+            user_id: 可选用户ID
 
         Returns:
             处理结果
@@ -137,15 +170,30 @@ class MultiCloudOrchestrator:
         execution_log = []
         api_trace = []  # 用于记录API调用
 
+        # 1. 创建或获取会话
+        if session_id:
+            session = self.conversation_manager.get_or_create_session(session_id=session_id)
+        else:
+            session = self.conversation_manager.create_session(user_id=user_id)
+
+        # 2. 添加用户消息
+        self.conversation_manager.add_message(
+            session.session_id,
+            MessageRole.USER,
+            user_query,
+            metadata={"context": context or {}}
+        )
+
         try:
             # 暂时禁用自动加载文档（embedding模型需要配置）
             # await self._ensure_cloud_docs_loaded()
 
-            logger.info(f"Processing request: {user_query}")
+            logger.info(f"Processing request (session={session.session_id}): {user_query}")
             execution_log.append({
                 "step": "start",
                 "timestamp": start_time.isoformat(),
-                "query": user_query
+                "query": user_query,
+                "session_id": session.session_id
             })
 
             # 检查是否需要多步骤规划（复杂查询）
@@ -224,11 +272,28 @@ class MultiCloudOrchestrator:
                         execution_plan,
                         intent,
                         execution_log,
-                        api_trace
+                        api_trace,
+                        session.session_id
                     )
 
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
+
+            # 3. 添加助手回复消息
+            success = result.get("success", True) if isinstance(result, dict) else True
+            response_content = self._format_response_message(result, intent, execution_plan)
+
+            self.conversation_manager.add_message(
+                session.session_id,
+                MessageRole.ASSISTANT,
+                response_content,
+                metadata={
+                    "intent": intent,
+                    "execution_plan": execution_plan,
+                    "duration": duration,
+                    "success": success
+                }
+            )
 
             return {
                 "success": True,
@@ -238,16 +303,28 @@ class MultiCloudOrchestrator:
                 "execution_log": execution_log,
                 "api_trace": api_trace,
                 "duration": duration,
-                "timestamp": end_time.isoformat()
+                "timestamp": end_time.isoformat(),
+                "session_id": session.session_id
             }
 
         except Exception as e:
             logger.error(f"Error processing request: {str(e)}")
-            return self._create_error_response(
+
+            # 添加错误消息到会话
+            self.conversation_manager.add_message(
+                session.session_id,
+                MessageRole.ASSISTANT,
+                f"处理请求时发生错误: {str(e)}",
+                metadata={"error": str(e), "error_type": "orchestrator_error"}
+            )
+
+            error_response = self._create_error_response(
                 "Orchestrator error",
                 str(e),
                 execution_log
             )
+            error_response["session_id"] = session.session_id
+            return error_response
     async def _execute_with_existing_api(
         self,
         execution_plan: Dict[str, Any],
@@ -294,7 +371,8 @@ class MultiCloudOrchestrator:
         execution_plan: Dict[str, Any],
         intent: Dict[str, Any],
         execution_log: List[Dict[str, Any]],
-        api_trace: List[Dict[str, Any]]
+        api_trace: List[Dict[str, Any]],
+        session_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """通过代码生成执行"""
         logger.info("Executing with code generation pipeline")
@@ -303,6 +381,19 @@ class MultiCloudOrchestrator:
         service = intent.get("service")
         operation = intent.get("operation")
         parameters = intent.get("parameters", {})
+
+        # 创建任务（如果有会话）
+        task = None
+        if session_id:
+            task = self.conversation_manager.add_task(
+                session_id,
+                f"生成并执行{cloud_provider} {service}的{operation}代码",
+                metadata={
+                    "cloud_provider": cloud_provider,
+                    "service": service,
+                    "operation": operation
+                }
+            )
 
         # 记录代码生成意图
         api_trace.append({
@@ -313,6 +404,14 @@ class MultiCloudOrchestrator:
             "operation": operation,
             "note": "API calls are embedded in generated code"
         })
+
+        # 更新任务状态为进行中
+        if task:
+            self.conversation_manager.update_task(
+                session_id,
+                task.task_id,
+                status=TaskStatus.IN_PROGRESS
+            )
 
         # 步骤1：拉取API规格文档
         logger.info("Step 2.1: Fetching API specifications")
@@ -475,6 +574,26 @@ class MultiCloudOrchestrator:
             "output": exec_response.get("output", "")[:500]  # 限制输出长度
         })
 
+        # 更新任务状态
+        if task:
+            if exec_response.get("success"):
+                self.conversation_manager.update_task(
+                    session_id,
+                    task.task_id,
+                    status=TaskStatus.COMPLETED,
+                    result={
+                        "output": exec_response.get("output"),
+                        "code_length": len(code_response.data.get("code", ""))
+                    }
+                )
+            else:
+                self.conversation_manager.update_task(
+                    session_id,
+                    task.task_id,
+                    status=TaskStatus.FAILED,
+                    error=exec_response.get("error", "代码执行失败")
+                )
+
         return {
             "success": exec_response.get("success"),
             "output": exec_response.get("output"),
@@ -579,6 +698,139 @@ class MultiCloudOrchestrator:
             "timestamp": datetime.now().isoformat()
         }
 
+    def _format_response_message(
+        self,
+        result: Any,
+        intent: Dict[str, Any],
+        execution_plan: Dict[str, Any]
+    ) -> str:
+        """格式化助手回复消息"""
+        # 简单的文本格式化
+        if isinstance(result, dict):
+            if result.get("success"):
+                operation = intent.get("operation", "操作")
+                service = intent.get("service", "服务")
+                cloud = intent.get("cloud_provider", "云平台")
+
+                if execution_plan.get("has_existing_api"):
+                    return f"已通过{cloud} {service}服务完成{operation}操作"
+                else:
+                    return f"已生成代码并完成{cloud} {service}的{operation}操作"
+            else:
+                return f"操作失败: {result.get('error', '未知错误')}"
+        else:
+            return f"操作完成，结果: {str(result)[:200]}"
+
+    def get_session(self, session_id: str) -> Optional[Any]:
+        """
+        获取会话信息
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            会话对象或None
+        """
+        return self.conversation_manager.get_session(session_id)
+
+    def get_conversation_history(
+        self,
+        session_id: str,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        获取对话历史
+
+        Args:
+            session_id: 会话ID
+            limit: 最大返回数量
+
+        Returns:
+            消息列表
+        """
+        messages = self.conversation_manager.get_conversation_history(
+            session_id,
+            limit=limit
+        )
+
+        return [
+            {
+                "role": msg.role.value,
+                "content": msg.content,
+                "timestamp": msg.timestamp.isoformat(),
+                "metadata": msg.metadata
+            }
+            for msg in messages
+        ]
+
+    def get_resumable_tasks(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        获取可恢复的任务
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            任务列表
+        """
+        tasks = self.conversation_manager.get_resumable_tasks(session_id)
+
+        return [
+            {
+                "task_id": task.task_id,
+                "description": task.description,
+                "status": task.status.value,
+                "error": task.error,
+                "metadata": task.metadata,
+                "created_at": task.created_at.isoformat()
+            }
+            for task in tasks
+        ]
+
+    async def resume_task(
+        self,
+        session_id: str,
+        task_id: str,
+        user_query: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        恢复失败的任务
+
+        Args:
+            session_id: 会话ID
+            task_id: 任务ID
+            user_query: 可选的新查询（用于重新提交）
+
+        Returns:
+            处理结果
+        """
+        # 恢复任务
+        task = self.conversation_manager.resume_task(session_id, task_id)
+
+        if not task:
+            return {
+                "success": False,
+                "error": "Task not found or cannot be resumed"
+            }
+
+        # 如果有新查询，重新处理
+        if user_query:
+            return await self.process_request(
+                user_query,
+                session_id=session_id
+            )
+        else:
+            # 使用原始任务信息重试
+            return {
+                "success": True,
+                "message": "Task resumed, waiting for user input",
+                "task": {
+                    "task_id": task.task_id,
+                    "description": task.description,
+                    "status": task.status.value
+                }
+            }
+
     async def health_check(self) -> Dict[str, Any]:
         """健康检查"""
         health = {
@@ -626,6 +878,15 @@ class MultiCloudOrchestrator:
             health["components"]["sandbox"] = {
                 "status": "ok",
                 "test_mode": self.config.wasm.test_mode
+            }
+
+            # Conversation Manager
+            stats = self.conversation_manager.get_session_stats()
+            health["components"]["conversation_manager"] = {
+                "status": "ok",
+                "active_sessions": stats["active_sessions"],
+                "total_messages": stats["total_messages"],
+                "total_tasks": stats["total_tasks"]
             }
 
         except Exception as e:
