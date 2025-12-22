@@ -17,6 +17,7 @@ from .base_agent import BaseAgent, AgentResponse
 from .code_generator_agent import CodeGeneratorAgent
 from .data_adapter_agent import DataAdapterAgent
 from config import get_config
+from llm_utils import create_chat_llm
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +55,8 @@ class ManagerAgent(BaseAgent):
         self.max_react_iterations = 8  # ReAct最大迭代次数
 
     def _init_llm(self) -> ChatOpenAI:
-        """初始化LLM"""
-        llm_config = self.config_obj.llm
-        return ChatOpenAI(
-            model=llm_config.model,
-            api_key=llm_config.api_key,
-            base_url=llm_config.base_url,
-            temperature=llm_config.temperature,
-            max_tokens=llm_config.max_tokens
-        )
+        """初始化LLM（禁用代理）"""
+        return create_chat_llm()
 
     def register_tool(self, tool_func):
         """注册工具"""

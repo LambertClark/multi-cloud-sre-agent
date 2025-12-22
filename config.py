@@ -18,6 +18,8 @@ class LLMConfig:
     base_url: str = field(default_factory=lambda: os.getenv("OPENAI_API_BASE", ""))
     temperature: float = 0.7
     max_tokens: int = 4000
+    # 禁用代理（硅基流动API在国内，不需要代理）
+    disable_proxy: bool = True
 
     # 多模型配置
     alternative_models: Dict[str, Dict[str, str]] = field(default_factory=lambda: {
