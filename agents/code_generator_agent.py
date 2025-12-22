@@ -21,6 +21,7 @@ from services.code_quality import CodeQualityAnalyzer
 from services.code_templates import CodeTemplateLibrary
 from services.test_generator import TestGenerator
 from services.code_reviewer import CodeReviewer
+from llm_utils import create_chat_llm
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +51,8 @@ class CodeGeneratorAgent(BaseAgent):
         self.code_reviewer = CodeReviewer()
 
     def _init_llm(self) -> ChatOpenAI:
-        """初始化LLM（配置更长的超时时间以应对网络不稳定）"""
-        llm_config = self.config_obj.llm
-
-        return ChatOpenAI(
-            model=llm_config.model,
-            api_key=llm_config.api_key,
-            base_url=llm_config.base_url,
-            temperature=llm_config.temperature,
-            max_tokens=llm_config.max_tokens,
-            timeout=120.0,  # 总超时120秒
-            max_retries=0   # 禁用LangChain内置重试，使用我们自己的重试逻辑
-        )
+        """初始化LLM（禁用代理，配置更长的超时时间）"""
+        return create_chat_llm(timeout=120.0)
 
     def get_capabilities(self) -> List[str]:
         """获取Agent能力"""

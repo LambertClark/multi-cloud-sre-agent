@@ -12,7 +12,6 @@ from llama_index.core import (
     Settings
 )
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.llms.openai import OpenAI as LlamaOpenAI
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 import chromadb
@@ -46,13 +45,9 @@ class RAGSystem:
 
     def _init_settings(self):
         """初始化LlamaIndex全局设置"""
-        # 配置LLM
-        Settings.llm = LlamaOpenAI(
-            model=self.config.llm.model,
-            api_key=self.config.llm.api_key,
-            api_base=self.config.llm.base_url,
-            temperature=self.config.llm.temperature
-        )
+        # 禁用LLM - RAG检索不需要LLM，只需要embedding
+        # 我们只做向量检索，不需要LLM生成响应
+        Settings.llm = None
 
         # 配置Embedding模型 - 使用HuggingFace本地模型
         # 延迟加载，避免启动时下载大模型
@@ -66,7 +61,7 @@ class RAGSystem:
             chunk_overlap=self.config.rag.chunk_overlap
         )
 
-        logger.info("RAG system settings initialized")
+        logger.info("RAG system settings initialized (LLM disabled, embedding only)")
 
     def _lazy_init_embedding(self):
         """延迟初始化Embedding模型"""
@@ -126,6 +121,7 @@ class RAGSystem:
                 }
 
             # 创建或更新索引
+            persist_dir = None  # 初始化persist_dir
             if self.config.rag.use_chromadb and self.chroma_client:
                 # 使用ChromaDB
                 collection_name = index_name.replace(".", "_")
@@ -138,6 +134,7 @@ class RAGSystem:
                     documents,
                     storage_context=storage_context
                 )
+                persist_dir = f"chromadb://{collection_name}"  # ChromaDB标识
                 logger.info(f"Created/updated ChromaDB index: {index_name}")
             else:
                 # 使用文件存储
