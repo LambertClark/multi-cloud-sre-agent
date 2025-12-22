@@ -1,29 +1,45 @@
 # 多云SRE Agent系统
 
-基于LangChain的智能多云SRE管理系统，通过统一Schema实现跨云平台的可观测性数据标准化。
+**核心理念：Agent驱动的智能SRE系统，通过Agent自主生成代码，而非硬编码具体功能**
+
+基于LangChain的智能多云SRE管理系统，通过Agent协作实现从API文档提取、代码生成到安全执行的全流程自动化。
 
 ## 🌟 核心特性
 
-### 1. 多云数据统一适配
-- **DataAdapterAgent**: 混合架构（规则引擎 + LLM智能转换）
-- **统一Schema体系**: 跨云平台的标准化数据模型
-- **零代码扩展**: 未知云平台自动通过LLM适配
+### 1. Agent驱动的代码生成
+- **SpecDocAgent**: SDK内省 + OpenAPI解析，动态提取2032+个API操作
+- **CodeGeneratorAgent**: ReAct模式自主生成→测试→修正，支持Python/JS/TS/Go
+- **DataAdapterAgent**: 混合架构（规则引擎 + LLM）实现多云数据统一
+- **ManagerAgent**: 任务分解和Agent协调（开发中）
 
-### 2. 支持的云平台
-| 云平台 | 计算资源 | 监控指标 | 日志/追踪 | 状态 |
-|--------|---------|---------|-----------|------|
-| **AWS** | EC2 | CloudWatch | X-Ray, CloudWatch Logs | ✅ 完整支持 |
-| **Azure** | Virtual Machine | Azure Monitor | Application Insights | ✅ 数据适配 |
-| **GCP** | Compute Engine | Cloud Monitoring | Cloud Trace | ✅ 数据适配 |
-| **火山云** | ECS | VeMonitor | TLS Logs | ✅ 数据适配 |
-| **Kubernetes** | Pod | - | - | ✅ 数据适配 |
+### 2. 增强RAG检索系统
+- **混合检索**: 向量检索 + BM25关键词检索，RRF融合
+- **Reranker重排序**: Cross-Encoder提升Top-K准确率
+- **Query改写**: LLM生成查询变体提升召回率
+- **智能缓存**: 24小时过期，DocumentCache双层缓存
 
-### 3. 智能代码生成
-- **动态工作流**: API规格拉取 → RAG检索 → 代码生成 → WASM测试
-- **ManagerAgent**: 自动识别意图、编排任务
-- **CodeGeneratorAgent**: 支持Python/JavaScript/TypeScript/Go
+### 3. 代码质量保障
+- **静态分析**: flake8 + pylint + mypy集成
+- **代码审查**: 安全漏洞、性能问题、最佳实践检查
+- **测试生成**: 自动生成单元测试，覆盖率>80%
+- **模板库**: 15+个常见模式（分页、重试、批量处理）
 
-### 4. 统一Schema体系
+### 4. 安全沙箱系统
+- **代码扫描**: AST静态分析，检测危险函数和资源删除
+- **沙箱执行**: 隔离环境，资源限制，异常捕获
+- **权限管理**: 最小权限原则，70个只读API操作白名单
+
+### 5. 工具动态注册
+- **自动注册**: 生成的代码自动注册为可复用工具
+- **质量评分**: 成功率70% + 使用频率20% + 执行速度10%
+- **版本管理**: 自动版本升级，代码变化检测
+
+### 6. 对话管理系统
+- **会话管理**: 多轮对话，24小时自动过期
+- **上下文压缩**: LLM总结历史，保持在token限制内
+- **任务续传**: 失败任务恢复执行，断点续传
+
+### 7. 统一Schema体系
 ```python
 # 健康检查Schema
 HealthSchema: MetricHealth, LogHealth, TraceHealth, ResourceHealth
@@ -54,10 +70,10 @@ cp .env.example .env
 ### 配置说明
 在 `.env` 文件中配置：
 ```bash
-# LLM配置
-LLM_MODEL=gpt-4
-LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://api.openai.com/v1
+# LLM配置（硅基流动API）
+LLM_MODEL=moonshotai/Kimi-K2-Instruct-0905
+LLM_API_KEY=your_siliconflow_api_key
+LLM_BASE_URL=https://api.siliconflow.cn/v1
 
 # AWS凭证（可选）
 AWS_ACCESS_KEY_ID=your_access_key
@@ -80,478 +96,468 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
 python main.py --mode interactive
 
 # 单次查询
-python main.py -m query -q "查询AWS EC2的CPU使用率"
+python main.py -m query -q "列出AWS EC2实例"
 
 # 健康检查模式
 python main.py --mode health
 ```
 
-## 📖 使用指南
+## 📖 核心组件详解
 
-### 1. DataAdapterAgent - 多云数据转换
+### 1. SpecDocAgent - SDK内省和动态文档提取
 
-DataAdapterAgent是本系统的核心组件，负责将各云平台的原始数据转换为统一Schema。
+**从SDK自动提取API定义，无需手动维护文档**
 
-#### 工作原理
-```
-原始数据 → 规则引擎(快速) → 统一Schema ✅
-   ↓
- 规则不匹配
-   ↓
-LLM智能转换(兜底) → 统一Schema ✅
-```
-
-#### 使用示例
-
-**AWS EC2 → ComputeResource**
 ```python
-import asyncio
+from agents.spec_doc_agent import SpecDocAgent
+
+agent = SpecDocAgent()
+
+# 提取AWS CloudWatch API
+result = await agent.process({
+    "action": "extract_spec",
+    "cloud_provider": "aws",
+    "service": "cloudwatch"
+})
+
+# 返回：39个CloudWatch操作的完整定义
+# get_metric_statistics, put_metric_data, describe_alarms...
+```
+
+**支持的云平台**:
+- ✅ **AWS**: boto3 SDK内省（898个操作）
+  - CloudWatch 39个、S3 110个、EC2 749个
+- ✅ **Azure**: Azure SDK内省（79个操作）
+  - Monitor 79个操作（客户端→操作组→方法三层架构）
+- ✅ **Kubernetes**: OpenAPI规格解析（1055个操作）
+  - 直接解析swagger.json标准规格
+- 🔨 **GCP**: 支持但需安装google-cloud包
+
+**DocumentCache智能缓存**:
+```python
+from services.doc_cache import DocumentCache
+
+cache = DocumentCache()
+
+# 获取或拉取文档（24小时缓存）
+spec = await cache.get_or_fetch(
+    cloud_provider="aws",
+    service="s3",
+    operation="list_buckets"
+)
+
+# 第一次：从SDK内省提取，存入RAG
+# 第二次（24小时内）：直接从内存缓存返回
+# 过期后：自动重新提取最新文档
+```
+
+### 2. CodeGeneratorAgent - ReAct模式代码生成
+
+**自主生成代码→测试→观察→修正（最多3次迭代）**
+
+```python
+from agents.code_generator_agent import CodeGeneratorAgent
+
+agent = CodeGeneratorAgent()
+
+# ReAct模式生成代码
+result = await agent.process_with_react({
+    "requirement": "列出所有运行中的EC2实例",
+    "operation": "describe_instances",
+    "cloud_provider": "aws",
+    "service": "ec2",
+    "language": "python",
+    "enable_auto_test": True
+})
+
+if result.success:
+    print(f"生成代码:\n{result.data['code']}")
+    print(f"测试代码:\n{result.data['test_code']}")
+    print(f"ReAct迭代次数: {result.data['iterations']}")
+    print(f"质量分数: {result.metadata['quality_score']}")
+    print(f"审查分数: {result.metadata['review_score']}")
+```
+
+**代码质量增强**:
+1. **CodeQualityAnalyzer**: flake8 + pylint + mypy静态分析
+2. **CodeReviewer**: 安全、性能、最佳实践审查
+3. **TestGenerator**: 自动生成单元测试（基础+边缘+异常+Mock）
+4. **CodeTemplateLibrary**: 15+个最佳实践模板
+
+**工作流程**:
+```
+1. Thought: 分析需求，规划实现
+2. Action: 生成代码和测试
+   ├── 从RAG检索相关文档
+   ├── 从模板库查找最佳实践
+   └── 生成完整代码（含错误处理）
+3. Observation: 执行测试
+   ├── 代码质量分析（flake8/pylint）
+   ├── 安全审查（SQL注入、命令注入等）
+   └── 单元测试执行（pytest）
+4. 如果失败：修正代码→重新测试（最多3次）
+5. 如果成功：返回代码 + 质量报告
+```
+
+### 3. EnhancedRAG - 混合检索系统
+
+**向量检索 + BM25关键词检索，RRF融合**
+
+```python
+from services.enhanced_rag import HybridRetriever, Reranker
+
+# 混合检索
+retriever = HybridRetriever(
+    vector_weight=0.6,  # 向量检索权重
+    bm25_weight=0.4,    # BM25权重
+    k=60                # RRF参数
+)
+
+results = await retriever.hybrid_retrieve(
+    query="AWS S3 bucket list",
+    top_k=10
+)
+
+# Reranker重排序
+reranker = Reranker()
+reranked = await reranker.rerank(
+    query="list S3 buckets",
+    documents=results,
+    top_k=5
+)
+
+# 结果：精准匹配"list_buckets" API文档
+```
+
+**Query改写提升召回**:
+```python
+from services.enhanced_rag import QueryRewriter
+
+rewriter = QueryRewriter()
+
+# 输入："我想创建云服务器"
+variants = await rewriter.rewrite_query(
+    "我想创建云服务器",
+    num_variants=3
+)
+
+# 输出：
+# 1. "创建虚拟机实例"
+# 2. "EC2 RunInstances API"
+# 3. "启动计算实例操作"
+```
+
+**检索评估指标**:
+- **P@K**: Precision at K（检索结果准确率）
+- **R@K**: Recall at K（检索结果召回率）
+- **NDCG@K**: 考虑排序的质量指标
+- **MRR**: Mean Reciprocal Rank（首个相关结果的平均排名）
+
+### 4. 安全沙箱系统
+
+**多层安全保障：扫描→权限→沙箱**
+
+```python
+from services.code_security import CodeSecurityScanner
+from services.code_sandbox import SandboxExecutor
+from services.permission_manager import PermissionManager
+
+# 1. 代码安全扫描
+scanner = CodeSecurityScanner()
+scan_result = scanner.scan(generated_code)
+
+if scan_result.level == SecurityLevel.BLOCKED:
+    raise SecurityError(f"代码包含危险操作: {scan_result.issues}")
+
+# 2. 权限检查
+permission_mgr = PermissionManager()
+if not permission_mgr.check_permission("ec2", "terminate_instances"):
+    raise PermissionError("禁止删除操作")
+
+# 3. 沙箱执行
+sandbox = SandboxExecutor(
+    timeout=30,
+    memory_limit_mb=512
+)
+result = sandbox.execute(
+    code=generated_code,
+    globals_dict={"boto3": boto3}
+)
+```
+
+**安全特性**:
+- ✅ 禁止exec/eval/compile等危险函数
+- ✅ 禁止terminate/delete等资源删除操作
+- ✅ 禁止os.system/subprocess等shell命令
+- ✅ 限制模块导入（仅云SDK和安全模块）
+- ✅ CPU时间和内存限制
+- ✅ 敏感信息检测（密码、API密钥）
+
+**权限管理**:
+- AWS: 32个只读操作（describe_*, list_*, get_*）
+- Azure: 14个只读操作
+- GCP: 8个只读操作
+- Kubernetes: 16个只读操作
+- **总计70个API操作白名单**
+
+### 5. 工具动态注册系统
+
+**生成的代码自动注册为可复用工具**
+
+```python
+from services.tool_registry import ToolRegistry, GeneratedTool
+
+registry = ToolRegistry()
+
+# 注册工具
+tool = GeneratedTool(
+    name="list_ec2_instances",
+    description="列出所有EC2实例",
+    code=generated_code,
+    test_code=test_code,
+    parameters=[...],
+    cloud_provider="aws",
+    service="ec2",
+    category="query"
+)
+
+result = registry.register(tool)
+# 首次注册：版本1.0.0
+# 代码变化：自动升级到1.0.1
+
+# 搜索工具
+tools = registry.search_tools(
+    cloud_provider="aws",
+    service="ec2",
+    query="list instances"
+)
+
+# 使用工具
+tool = tools[0]
+result = exec(tool.code)
+
+# 记录指标
+registry.record_execution(
+    tool_id=tool.tool_id,
+    success=True,
+    execution_time=0.5
+)
+
+# 质量评分自动更新
+# 质量分 = 成功率*70% + 使用频率*20% + 执行速度*10%
+```
+
+**工作流程**:
+```
+1. 用户请求："列出K8s Pod"
+2. registry.search_tools(query="list pods", cloud_provider="kubernetes")
+3. 如果找到 → 直接使用现有工具（复用率100%）
+4. 如果未找到 → CodeGeneratorAgent生成新代码
+5. 测试通过 → registry.register(tool)
+6. 下次同样请求 → 命中工具库，无需重新生成
+```
+
+### 6. 对话管理和上下文压缩
+
+**支持多轮对话和任务续传**
+
+```python
+from services.conversation_manager import ConversationManager, MessageRole
+
+manager = ConversationManager()
+
+# 创建会话
+session = manager.create_session(user_id="user1")
+
+# 添加消息
+manager.add_message(
+    session.session_id,
+    MessageRole.USER,
+    "查询电商平台的EC2实例"
+)
+
+# 设置上下文变量
+manager.set_context_variable(session.session_id, "business_name", "电商平台")
+
+# 添加任务
+task = manager.add_task(
+    session.session_id,
+    "查询AWS EC2实例"
+)
+
+# 任务执行失败
+manager.update_task(
+    session.session_id,
+    task.task_id,
+    status=TaskStatus.FAILED,
+    error="网络超时"
+)
+
+# 恢复任务
+manager.resume_task(session.session_id, task.task_id)
+```
+
+**上下文压缩**:
+```python
+from services.context_compressor import ContextCompressor
+
+compressor = ContextCompressor()
+
+# 长对话自动压缩
+if len(session.messages) > 20:
+    compressed_session = await compressor.compress_session(session)
+    # 40条消息 → 1条总结 + 5条最近消息
+```
+
+**特性**:
+- ✅ 24小时会话过期
+- ✅ 消息历史持久化（JSON）
+- ✅ 任务状态跟踪（pending→in_progress→completed/failed）
+- ✅ 上下文变量管理（业务名称、云平台等）
+- ✅ LLM总结历史（控制在token限制内）
+- ✅ 任务续传（失败/暂停任务恢复）
+
+### 7. DataAdapterAgent - 多云数据统一
+
+**混合架构：规则引擎（快速）+ LLM（智能）**
+
+```python
 from agents.data_adapter_agent import DataAdapterAgent
 
-async def convert_ec2_data():
-    agent = DataAdapterAgent()
+agent = DataAdapterAgent()
 
-    # AWS EC2原始数据
-    aws_ec2_data = {
-        "InstanceId": "i-1234567890abcdef0",
-        "InstanceType": "t3.medium",
-        "State": {"Name": "running"},
-        "PrivateIpAddress": "172.31.0.10",
-        "PublicIpAddress": "54.123.45.67",
-        "Tags": [{"Key": "Environment", "Value": "Production"}]
-    }
-
-    # 转换为统一Schema
-    result = await agent.safe_process({
-        "raw_data": aws_ec2_data,
-        "cloud_provider": "aws",
-        "target_schema": "ComputeResource"
-    })
-
-    if result.success:
-        resource = result.data
-        print(f"资源ID: {resource.resource_id}")
-        print(f"状态: {resource.state}")
-        print(f"实例类型: {resource.instance_type}")
-        print(f"转换方法: {result.metadata['conversion_method']}")  # fast_rule
-
-asyncio.run(convert_ec2_data())
-```
-
-**Azure VM → ComputeResource**
-```python
-# Azure虚拟机数据
-azure_vm_data = {
-    "vmId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    "name": "web-vm-01",
-    "location": "eastus",
-    "hardwareProfile": {"vmSize": "Standard_D2s_v3"},
-    "instanceView": {
-        "statuses": [
-            {"code": "PowerState/running"}
-        ]
-    }
+# AWS EC2 → ComputeResource
+aws_ec2_data = {
+    "InstanceId": "i-1234567890abcdef0",
+    "InstanceType": "t3.medium",
+    "State": {"Name": "running"}
 }
 
 result = await agent.safe_process({
-    "raw_data": azure_vm_data,
-    "cloud_provider": "azure",
-    "target_schema": "ComputeResource"
-})
-# 输出相同的ComputeResource格式 ✅
-```
-
-**GCP GCE → ComputeResource**
-```python
-# GCP Compute Engine数据
-gcp_gce_data = {
-    "id": "123456789012345678",
-    "name": "web-instance-01",
-    "machineType": "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/machineTypes/n1-standard-2",
-    "status": "RUNNING",
-    "zone": "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a",
-    "networkInterfaces": [
-        {"networkIP": "10.128.0.2"}
-    ]
-}
-
-result = await agent.safe_process({
-    "raw_data": gcp_gce_data,
-    "cloud_provider": "gcp",
-    "target_schema": "ComputeResource"
-})
-# 输出相同的ComputeResource格式 ✅
-```
-
-### 2. 健康判断标准
-
-系统内置了统一的健康判断阈值：
-
-```python
-from schemas.health_schema import HealthThreshold
-
-# 默认阈值
-thresholds = HealthThreshold()
-print(thresholds.cpu_warning_threshold)       # 80.0 (CPU警告阈值)
-print(thresholds.cpu_critical_threshold)      # 95.0 (CPU严重阈值)
-print(thresholds.log_error_rate_warning)      # 0.01 (1% 错误率警告)
-print(thresholds.trace_error_rate_warning)    # 0.01 (1% trace错误率)
-print(thresholds.trace_p95_latency_warning_ms) # 1000.0 (P95延迟1秒)
-```
-
-### 3. 监控指标转换
-
-**AWS CloudWatch → MetricResult**
-```python
-cloudwatch_data = {
-    "Datapoints": [
-        {"Timestamp": "2024-01-01T00:00:00Z", "Average": 65.2},
-        {"Timestamp": "2024-01-01T00:05:00Z", "Average": 72.8}
-    ],
-    "Label": "CPUUtilization"
-}
-
-result = await agent.safe_process({
-    "raw_data": cloudwatch_data,
+    "raw_data": aws_ec2_data,
     "cloud_provider": "aws",
-    "target_schema": "MetricResult"
+    "target_schema": "ComputeResource"
 })
 
-metric = result.data
-print(f"指标名称: {metric.metric_name}")
-print(f"数据点数量: {len(metric.datapoints)}")
+# 快速规则：毫秒级转换
+resource = result.data
+print(f"资源ID: {resource.resource_id}")
+print(f"状态: {resource.state}")
+print(f"转换方法: {result.metadata['conversion_method']}")  # fast_rule
 ```
 
-**火山云VeMonitor → MetricResult**
-```python
-volc_metric_data = {
-    "MetricName": "CpuUtil",
-    "Namespace": "VCM/ECS",
-    "Data": [
-        {"Timestamp": 1700000000, "Value": 45.2},
-        {"Timestamp": 1700000060, "Value": 52.8}
-    ]
-}
-
-result = await agent.safe_process({
-    "raw_data": volc_metric_data,
-    "cloud_provider": "volc",
-    "target_schema": "MetricResult"
-})
-# 输出统一的MetricResult格式 ✅
-```
-
-### 4. 智能代码生成
-
-对于没有现成工具的云平台/服务，系统会自动生成代码：
-
-```python
-from agents.manager_agent import ManagerAgent
-
-async def query_gcp_metrics():
-    manager = ManagerAgent()
-
-    # 用户查询
-    response = await manager.process({
-        "query": "查询GCP Compute Engine实例的CPU使用率"
-    })
-
-    # ManagerAgent会自动：
-    # 1. 识别: cloud_provider=gcp, service=monitoring
-    # 2. 判断: 没有现成的GCPMonitoringTools
-    # 3. 拉取: GCP Cloud Monitoring API规格
-    # 4. 生成: Python调用代码
-    # 5. 测试: WASM沙箱验证
-    # 6. 执行: 获取数据
-    # 7. 转换: 通过DataAdapterAgent转为MetricResult
-
-    print(response.data)
-
-asyncio.run(query_gcp_metrics())
-```
+**支持的转换**:
+- ✅ AWS/Azure/GCP/Volcano/K8s → ComputeResource
+- ✅ CloudWatch/AzureMonitor/CloudMonitoring → MetricResult
+- ✅ CloudWatchLogs/TLS → LogHealth
+- ✅ X-Ray/AppInsights/CloudTrace → TraceHealth
 
 ## 🧪 测试
 
 ### 运行所有测试
 ```bash
+# 代码质量集成测试
+uv run pytest tests/test_code_quality_integration.py -v
+
+# 对话管理测试
+uv run pytest tests/test_conversation_manager.py -v
+
 # DataAdapterAgent测试
-python tests/test_data_adapter_agent.py
+uv run pytest tests/test_data_adapter_agent.py -v
 
-# Azure/GCP适配测试
-python tests/test_azure_gcp_adapter.py
+# 工具注册表测试
+uv run pytest tests/test_tool_registry.py -v
 
-# 火山云适配测试
-python tests/test_volc_adapter.py
+# 安全沙箱测试
+uv run pytest tests/test_security_sandbox.py -v
 
-# 系统集成测试
-python test_system.py
+# 增强RAG测试
+uv run pytest tests/test_enhanced_rag.py -v
 ```
 
-### 测试覆盖范围
-✅ AWS数据转换（EC2, CloudWatch, X-Ray, Logs）
-✅ Azure数据转换（VM, Monitor, AppInsights）
-✅ GCP数据转换（GCE, CloudMonitoring, CloudTrace）
-✅ 火山云数据转换（ECS, VeMonitor, TLS）
-✅ Kubernetes数据转换（Pod）
-✅ 健康判断标准验证
+### 测试覆盖
+- ✅ 代码质量分析（19个测试）
+- ✅ 对话管理系统（18个测试）
+- ✅ 数据适配转换
+- ✅ 工具注册和搜索
+- ✅ 安全沙箱系统
+- ✅ RAG混合检索
 
 ## 📁 项目结构
 
 ```
 multi-cloud-sre-agent/
 ├── agents/                          # Agent模块
-│   ├── __init__.py
 │   ├── base_agent.py               # Agent基类
 │   ├── manager_agent.py            # 任务编排Agent
-│   ├── code_generator_agent.py     # 代码生成Agent
-│   └── data_adapter_agent.py       # ⭐ 数据适配Agent（核心）
+│   ├── code_generator_agent.py     # ⭐ 代码生成Agent（ReAct模式）
+│   ├── data_adapter_agent.py       # ⭐ 数据适配Agent
+│   └── spec_doc_agent.py           # ⭐ SDK内省和文档提取Agent
 │
-├── schemas/                         # ⭐ 统一Schema定义
-│   ├── __init__.py
+├── services/                        # 核心服务
+│   ├── doc_cache.py                # ⭐ 智能文档缓存
+│   ├── enhanced_rag.py             # ⭐ 混合检索系统
+│   ├── code_quality.py             # ⭐ 代码质量分析
+│   ├── code_reviewer.py            # ⭐ 代码审查器
+│   ├── code_templates.py           # ⭐ 代码模板库
+│   ├── test_generator.py           # ⭐ 测试生成器
+│   ├── code_security.py            # ⭐ 代码安全扫描
+│   ├── code_sandbox.py             # ⭐ 沙箱执行环境
+│   ├── permission_manager.py       # ⭐ 权限管理
+│   ├── tool_registry.py            # ⭐ 工具注册表
+│   ├── conversation_manager.py     # ⭐ 对话管理
+│   └── context_compressor.py       # ⭐ 上下文压缩
+│
+├── schemas/                         # 统一Schema定义
 │   ├── health_schema.py            # 健康检查Schema
 │   ├── resource_schema.py          # 资源Schema
 │   └── metric_schema.py            # 指标Schema
 │
 ├── tools/                           # 云平台工具
-│   ├── __init__.py
 │   ├── cloud_tools.py              # 工具注册中心
 │   ├── aws_tools.py                # AWS监控工具
 │   └── azure_tools.py              # Azure监控工具
 │
 ├── tests/                           # 测试文件
-│   ├── test_data_adapter_agent.py  # DataAdapter测试
-│   ├── test_azure_gcp_adapter.py   # Azure/GCP测试
-│   └── test_volc_adapter.py        # 火山云测试
+│   ├── test_code_quality_integration.py
+│   ├── test_conversation_manager.py
+│   ├── test_data_adapter_agent.py
+│   ├── test_tool_registry.py
+│   ├── test_security_sandbox.py
+│   └── test_enhanced_rag.py
 │
-├── docs/                            # 文档
-│   ├── TODO.md                     # 任务列表
-│   └── data_adapter_agent.md       # DataAdapter文档
-│
-├── rag_system/                      # RAG系统
-│   └── chroma_rag.py               # ChromaDB向量存储
-│
+├── rag_system.py                    # RAG系统
 ├── config.py                        # 配置管理
 ├── main.py                          # 主入口
-├── orchestrator.py                  # 编排器
-├── test_system.py                   # 系统测试
-├── pyproject.toml                   # 项目配置
-└── README.md                        # 本文档
+└── orchestrator.py                  # 编排器
 ```
 
-## 🔧 核心组件详解
+## 🎯 核心原则
 
-### DataAdapterAgent
+1. **Agent优先**: 能让Agent生成的绝不手写
+2. **质量优先**: 宁可慢一点，也要保证生成代码的正确性
+3. **安全优先**: 沙箱隔离，防止恶意代码
+4. **可观测**: 记录所有决策过程，便于调试和优化
+5. **持续改进**: 从失败中学习，不断提升能力
 
-**混合架构设计**
-```python
-# 快速路径：规则引擎
-FAST_RULES = {
-    "aws": {
-        "ec2_to_compute": {...},      # AWS EC2 → ComputeResource
-        "cloudwatch_metric": {...},   # CloudWatch → MetricResult
-    },
-    "azure": {
-        "vm_to_compute": {...},       # Azure VM → ComputeResource
-        "monitor_metric": {...},      # Azure Monitor → MetricResult
-    },
-    "gcp": {...},
-    "volc": {...},
-    "kubernetes": {...}
-}
+## 🚧 开发中
 
-# 智能路径：LLM + RAG
-# 当规则不匹配时，自动使用LLM进行智能转换
-# 可查询RAG系统获取API文档辅助理解
-```
+- [ ] Manager Agent完整实现
+- [ ] DiagnosticAgent故障诊断
+- [ ] Agent协作优化
+- [ ] 可观测性监控Dashboard
 
-**支持的转换**
-- ✅ 计算资源: EC2/VM/GCE/ECS → `ComputeResource`
-- ✅ 容器资源: Pod → `ContainerResource`
-- ✅ 监控指标: CloudWatch/AzureMonitor/CloudMonitoring/VeMonitor → `MetricResult`
-- ✅ 日志健康: CloudWatchLogs/TLS → `LogHealth`
-- ✅ 链路追踪: X-Ray/AppInsights/CloudTrace → `TraceHealth`
+## 📊 系统统计
 
-### 统一Schema
+**当前能力**:
+- 2032个API操作（AWS 898、Azure 79、K8s 1055）
+- 15+个代码模板（分页、重试、批量处理等）
+- 70个只读API操作白名单
+- 代码质量评分系统（0-100分）
+- 工具质量评分（成功率+频率+速度）
 
-**ResourceSchema**
-```python
-class ComputeResource(CloudResource):
-    resource_id: str              # 统一资源ID
-    resource_type: ResourceType   # ec2/vm_azure/gce/ecs_volc
-    cloud_provider: str           # aws/azure/gcp/volc
-    state: ResourceState          # running/stopped/pending
-    instance_type: str            # t3.medium/Standard_D2s_v3/n1-standard-2
-    private_ip: str
-    public_ip: str
-    tags: Dict[str, str]
-    # ... 更多统一字段
-```
-
-**HealthSchema**
-```python
-class MetricHealth(BaseModel):
-    metric_name: str
-    current_value: float
-    threshold_warning: float
-    threshold_critical: float
-    status: HealthStatus          # healthy/degraded/unhealthy/critical
-    health_score: float           # 0-100
-```
-
-## 🎯 使用场景
-
-### 场景1: 多云资源统一监控
-```python
-# 一次性获取AWS、Azure、GCP的所有VM，统一格式
-resources = []
-
-# AWS EC2
-aws_instances = get_aws_ec2_instances()
-for instance in aws_instances:
-    resource = await adapter.convert(instance, "aws", "ComputeResource")
-    resources.append(resource)
-
-# Azure VM
-azure_vms = get_azure_vms()
-for vm in azure_vms:
-    resource = await adapter.convert(vm, "azure", "ComputeResource")
-    resources.append(resource)
-
-# GCP GCE
-gcp_instances = get_gcp_instances()
-for instance in gcp_instances:
-    resource = await adapter.convert(instance, "gcp", "ComputeResource")
-    resources.append(resource)
-
-# 所有资源现在是统一格式，可以统一处理
-for resource in resources:
-    if resource.state == ResourceState.RUNNING:
-        print(f"{resource.cloud_provider}: {resource.resource_name} is running")
-```
-
-### 场景2: 跨云CPU监控告警
-```python
-# 统一查询所有云平台的CPU指标
-metrics = []
-
-# AWS CloudWatch
-aws_metrics = get_aws_cloudwatch_metrics()
-for m in aws_metrics:
-    metric = await adapter.convert(m, "aws", "MetricResult")
-    metrics.append(metric)
-
-# Azure Monitor
-azure_metrics = get_azure_monitor_metrics()
-for m in azure_metrics:
-    metric = await adapter.convert(m, "azure", "MetricResult")
-    metrics.append(metric)
-
-# 统一判断：CPU > 80%
-for metric in metrics:
-    if metric.datapoints:
-        latest = metric.datapoints[-1].value
-        if latest > 80:
-            print(f"⚠️ {metric.metric_name} 过高: {latest}%")
-```
-
-### 场景3: 自动化健康检查
-```python
-from schemas.health_schema import HealthThreshold
-
-thresholds = HealthThreshold()
-
-# 检查日志健康
-log_data = get_cloudwatch_logs()  # 或 get_azure_logs() / get_volc_logs()
-log_health = await adapter.convert(log_data, "aws", "LogHealth")
-
-if log_health.error_rate > thresholds.log_error_rate_warning:
-    alert(f"日志错误率过高: {log_health.error_rate:.2%}")
-
-# 检查链路健康
-trace_data = get_xray_traces()  # 或 get_app_insights_traces()
-trace_health = await adapter.convert(trace_data, "aws", "TraceHealth")
-
-if trace_health.p95_duration_ms > thresholds.trace_p95_latency_warning_ms:
-    alert(f"P95延迟过高: {trace_health.p95_duration_ms}ms")
-```
-
-## 🔌 扩展新云平台
-
-### 方案1: 添加快速规则（推荐）
-```python
-# 在 data_adapter_agent.py 的 FAST_RULES 中添加
-"aliyun": {
-    "ecs_to_compute": {
-        "applicable": lambda data: "InstanceId" in data and "Status" in data,
-        "converter": "_convert_aliyun_ecs_fast"
-    }
-}
-
-# 实现转换方法
-def _convert_aliyun_ecs_fast(self, raw_data, target_schema):
-    return ComputeResource(
-        resource_id=raw_data["InstanceId"],
-        resource_type=ResourceType.ECS,
-        cloud_provider="aliyun",
-        state=self._map_aliyun_state(raw_data["Status"]),
-        # ...
-    )
-```
-
-### 方案2: 零配置（LLM自动适配）
-```python
-# 直接使用，无需配置
-unknown_cloud_data = {...}  # 任意云平台数据
-
-result = await adapter.safe_process({
-    "raw_data": unknown_cloud_data,
-    "cloud_provider": "unknown_cloud",
-    "target_schema": "ComputeResource"
-})
-
-# DataAdapterAgent会自动：
-# 1. 尝试规则引擎（失败）
-# 2. 使用LLM智能理解数据格式
-# 3. 查询RAG获取Schema定义
-# 4. 生成正确的转换结果
-```
-
-## 🛠️ 开发指南
-
-### 添加新的Schema
-```python
-# 在 schemas/ 目录下创建新文件
-from pydantic import BaseModel, Field
-
-class DatabaseHealth(BaseModel):
-    """数据库健康检查Schema"""
-    db_instance_id: str = Field(..., description="数据库实例ID")
-    connection_count: int = Field(..., description="连接数")
-    slow_query_count: int = Field(..., description="慢查询数")
-    # ...
-```
-
-### 自定义健康阈值
-```python
-from schemas.health_schema import HealthThreshold
-
-# 自定义阈值
-custom_threshold = HealthThreshold(
-    cpu_warning_threshold=70.0,      # 降低CPU警告阈值到70%
-    trace_p95_latency_warning_ms=500.0  # P95延迟500ms警告
-)
-```
-
-## 📊 性能特点
-
-- **规则引擎**: 毫秒级转换速度
-- **LLM兜底**: 3-5秒智能转换（未知格式）
-- **RAG检索**: 向量化文档，精准匹配
-- **并发处理**: 支持批量数据转换
-
-## ⚠️ 注意事项
-
-1. **LLM API密钥**: 必须配置才能使用智能转换和代码生成
-2. **云平台凭证**: 仅在实际调用云API时需要
-3. **数据适配**: 可以完全离线使用（使用规则引擎）
-4. **成本控制**: 优先使用规则引擎，减少LLM调用
+**测试覆盖**:
+- 代码质量：19个测试✅
+- 对话管理：18个测试✅
+- 安全沙箱：5个测试✅
+- 工具注册：5个测试✅
