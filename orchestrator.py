@@ -9,7 +9,6 @@ from datetime import datetime
 
 from agents import ManagerAgent, SpecDocAgent, CodeGeneratorAgent
 from agents.task_planner_agent import get_task_planner
-from tools import CloudToolRegistry, AWSMonitoringTools, AzureMonitoringTools
 from tools.cloud_tools import get_tool_registry
 from rag_system import get_rag_system
 from wasm_sandbox import get_sandbox
@@ -63,55 +62,36 @@ class MultiCloudOrchestrator:
         logger.info("MultiCloudOrchestrator initialized with conversation management")
 
     def _init_cloud_tools(self):
-        """初始化云服务工具"""
-        # 初始化AWS工具
-        aws_tools = AWSMonitoringTools()
+        """初始化云服务工具
 
-        # 初始化Azure工具
-        azure_tools = AzureMonitoringTools()
+        注意：我们不硬编码具体的云服务工具！
+        工具应该由Agent根据用户请求动态生成。
+        这里只保留工具注册表的初始化。
+        """
+        # 不再初始化硬编码的AWS/Azure工具类
+        # 让Agent在运行时动态生成所需的代码
 
-        # 注册工具到Manager Agent
-        self._register_tools_with_manager()
-
-        logger.info("Cloud tools initialized (AWS, Azure)")
+        logger.info("Tool registry ready - Agent will generate tools on demand")
 
     def _register_tools_with_manager(self):
-        """向Manager Agent注册已有的API"""
-        # AWS CloudWatch
-        self.manager_agent.register_api(
-            "aws", "cloudwatch",
-            ["get_metric_statistics", "list_metrics", "put_metric_alarm", "describe_alarms"]
-        )
+        """
+        （已废弃）不再硬编码API注册
 
-        # AWS Logs
-        self.manager_agent.register_api(
-            "aws", "logs",
-            ["filter_log_events", "get_log_events", "describe_log_groups"]
-        )
+        原设计：手动注册AWS、Azure等云平台的API
+        新设计：Agent根据用户请求，通过SpecDocAgent动态获取API定义，
+                然后由CodeGeneratorAgent生成代码，最后注册到ToolRegistry
 
-        # AWS X-Ray
-        self.manager_agent.register_api(
-            "aws", "xray",
-            ["get_trace_summaries", "get_service_graph"]
-        )
-
-        # Azure Monitor
-        self.manager_agent.register_api(
-            "azure", "monitor",
-            ["get_metric_statistics", "list_metrics", "create_metric_alert", "list_alert_rules"]
-        )
-
-        # Azure Logs
-        self.manager_agent.register_api(
-            "azure", "logs",
-            ["query_logs", "list_workspaces"]
-        )
-
-        # Azure Application Insights
-        self.manager_agent.register_api(
-            "azure", "appinsights",
-            ["query_traces", "query_dependencies"]
-        )
+        工作流程：
+        1. 用户请求："查询AWS EC2实例"
+        2. ManagerAgent判断工具库中没有对应工具
+        3. SpecDocAgent从boto3 SDK内省提取EC2 API定义
+        4. CodeGeneratorAgent根据API定义生成代码
+        5. 代码测试通过后，自动注册到ToolRegistry
+        6. 下次同样请求直接使用已注册工具
+        """
+        # 不再硬编码任何API
+        # 所有工具由Agent动态生成
+        pass
 
     async def _ensure_cloud_docs_loaded(self):
         """确保云文档已加载"""

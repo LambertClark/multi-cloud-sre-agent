@@ -4,6 +4,37 @@
 
 基于LangChain的智能多云SRE管理系统，通过Agent协作实现从API文档提取、代码生成到安全执行的全流程自动化。
 
+## 💡 核心理念
+
+### ✅ 我们做什么
+- **构建强大的RAG系统** - 让Agent获取准确的API文档
+- **开发Agent框架** - 让Agent能自主协作和决策
+- **提升代码生成质量** - 让Agent生成的代码可靠可用
+- **建立工具动态注册机制** - 让Agent自己创造工具
+
+### ❌ 我们不做什么
+- ❌ **不硬编码K8s工具类** - 让Agent根据需求动态生成
+- ❌ **不手写CloudFront监控函数** - 让Agent查询SDK并生成代码
+- ❌ **不实现具体的日志巡查逻辑** - 让Agent理解需求后生成实现
+- ❌ **不开发Trace根因分析算法** - 让Agent学习并生成分析代码
+
+### 🎯 工作流程
+```
+用户请求："查询AWS EC2 CPU使用率"
+    ↓
+ManagerAgent判断工具库中没有对应工具
+    ↓
+SpecDocAgent从boto3 SDK内省提取CloudWatch API定义
+    ↓
+CodeGeneratorAgent根据API定义生成Python代码
+    ↓
+代码安全扫描 → 沙箱测试 → 执行
+    ↓
+成功后自动注册到ToolRegistry
+    ↓
+下次同样请求直接复用已注册工具
+```
+
 ## 🌟 核心特性
 
 ### 1. Agent驱动的代码生成
