@@ -504,6 +504,16 @@ class MultiCloudOrchestrator:
                 "parameters": parameters
             })
 
+            # 确保test_response是字典类型
+            if not isinstance(test_response, dict):
+                logger.error(f"Invalid test_response type: {type(test_response)}, value: {test_response}")
+                test_response = {
+                    "success": False,
+                    "error": f"Invalid test response type: {type(test_response)}",
+                    "tests": [],
+                    "errors": [str(test_response)]
+                }
+
             execution_log.append({
                 "step": f"test_code_attempt_{attempt + 1}",
                 "timestamp": datetime.now().isoformat(),
@@ -525,7 +535,10 @@ class MultiCloudOrchestrator:
                 retry_context = {
                     "previous_code": generated_code,
                     "test_errors": test_response.get("errors", []),
-                    "failed_tests": [t for t in test_response.get("tests", []) if not t.get("passed")],
+                    "failed_tests": [
+                        t for t in test_response.get("tests", [])
+                        if isinstance(t, dict) and not t.get("passed")
+                    ],
                     "error_summary": self._summarize_test_errors(test_response)
                 }
             else:
@@ -633,7 +646,10 @@ class MultiCloudOrchestrator:
     def _summarize_test_errors(self, test_response: Dict[str, Any]) -> str:
         """总结测试错误，生成简洁的错误描述供LLM理解"""
         errors = test_response.get("errors", [])
-        failed_tests = [t for t in test_response.get("tests", []) if not t.get("passed")]
+        failed_tests = [
+            t for t in test_response.get("tests", [])
+            if isinstance(t, dict) and not t.get("passed")
+        ]
 
         summary_parts = []
 
@@ -641,8 +657,11 @@ class MultiCloudOrchestrator:
         if errors:
             error_types = {}
             for error in errors:
-                error_type = error.get("type", "unknown")
-                error_types[error_type] = error_types.get(error_type, 0) + 1
+                if isinstance(error, dict):
+                    error_type = error.get("type", "unknown")
+                    error_types[error_type] = error_types.get(error_type, 0) + 1
+                else:
+                    error_types["unknown"] = error_types.get("unknown", 0) + 1
 
             summary_parts.append(f"Errors: {', '.join([f'{k}({v})' for k, v in error_types.items()])}")
 
@@ -655,7 +674,13 @@ class MultiCloudOrchestrator:
         if errors:
             key_errors = []
             for error in errors[:2]:  # 最多2个详细错误
-                msg = error.get("message", "")
+                if isinstance(error, dict):
+                    msg = error.get("message", "")
+                elif isinstance(error, str):
+                    msg = error
+                else:
+                    msg = str(error)
+
                 if msg:
                     key_errors.append(msg[:100])  # 限制长度
             if key_errors:

@@ -1,6 +1,15 @@
 """
-AWS可观测性工具集
-聚焦CloudWatch监控、日志、X-Ray追踪等
+AWS可观测性工具集（示例/参考实现）
+
+⚠️ 重要说明：
+本文件不应该在系统启动时自动初始化！
+
+用途：
+1. 作为Agent代码生成的参考实现
+2. 用于测试和验证
+3. 可选的手动注册（如果用户明确需要）
+
+核心理念：工具应该由Agent根据用户需求动态生成，而不是硬编码。
 """
 from typing import Dict, Any, List, Optional
 from langchain_core.tools import tool

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 
 from agents.task_planner_agent import TaskStep
-from tools.aws_tools import AWSMonitoringTools
+from tools.cloud_tools import get_tool_registry
 from config import get_config
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class TaskExecutor:
 
     def __init__(self):
         self.config = get_config()
-        self.aws_tools = AWSMonitoringTools()
+        self.tool_registry = get_tool_registry()
 
     async def execute_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -256,17 +256,22 @@ class TaskExecutor:
         parameters: Dict[str, Any],
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """列出资源"""
+        """列出资源（通过ToolRegistry调用动态注册的工具）"""
         resource_type = parameters.get("resource_type", "ec2")
         tags = parameters.get("tags", {})
 
         if resource_type == "ec2":
-            # 使用AWS工具列出EC2实例
-            result = await self.aws_tools._list_ec2_instances_impl(tags=tags)
-            
+            # 通过ToolRegistry调用EC2工具（需要提前通过Agent生成并注册）
+            result = await self.tool_registry.call(
+                cloud_provider="aws",
+                service="ec2",
+                operation="describe_instances",
+                parameters={"tags": tags}
+            )
+
             # 记录API调用
             from datetime import datetime
-            if isinstance(result, dict):
+            if isinstance(result, dict) and result.get("success"):
                 result["api_calls"] = [{
                     "timestamp": datetime.now().isoformat(),
                     "type": "task_execution",
@@ -294,22 +299,27 @@ class TaskExecutor:
         if not resources:
             return {"success": False, "error": "No resources to query metrics"}
 
-        # 并行查询所有实例的指标
+        # 并行查询所有实例的指标（通过ToolRegistry）
         tasks = []
         api_calls = []
         from datetime import datetime
-        
+
         for instance in resources:
             instance_id = instance.get("InstanceId")
             tasks.append(
-                self.aws_tools._get_metric_statistics_impl(
-                    namespace=namespace,
-                    metric_name=metric_name,
-                    dimensions=[{"Name": "InstanceId", "Value": instance_id}],
-                    period=parameters.get("period", 300),
-                    statistics=parameters.get("statistics", ["Average"]),
-                    start_time=parameters.get("start_time"),
-                    end_time=parameters.get("end_time")
+                self.tool_registry.call(
+                    cloud_provider="aws",
+                    service="cloudwatch",
+                    operation="get_metric_statistics",
+                    parameters={
+                        "namespace": namespace,
+                        "metric_name": metric_name,
+                        "dimensions": [{"Name": "InstanceId", "Value": instance_id}],
+                        "period": parameters.get("period", 300),
+                        "statistics": parameters.get("statistics", ["Average"]),
+                        "start_time": parameters.get("start_time"),
+                        "end_time": parameters.get("end_time")
+                    }
                 )
             )
             # 记录每个API调用
@@ -348,15 +358,20 @@ class TaskExecutor:
         parameters: Dict[str, Any],
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """查询日志"""
+        """查询日志（通过ToolRegistry）"""
         log_group = parameters.get("log_group")
         query = parameters.get("query", "")
 
-        result = await self.aws_tools._query_logs_impl(
-            log_group=log_group,
-            query_string=query,
-            start_time=parameters.get("start_time"),
-            end_time=parameters.get("end_time")
+        result = await self.tool_registry.call(
+            cloud_provider="aws",
+            service="logs",
+            operation="filter_log_events",
+            parameters={
+                "log_group": log_group,
+                "query_string": query,
+                "start_time": parameters.get("start_time"),
+                "end_time": parameters.get("end_time")
+            }
         )
 
         return result
@@ -366,13 +381,18 @@ class TaskExecutor:
         parameters: Dict[str, Any],
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """查询追踪"""
+        """查询追踪（通过ToolRegistry）"""
         filter_expression = parameters.get("filter_expression")
 
-        result = await self.aws_tools._get_trace_summaries_impl(
-            filter_expression=filter_expression,
-            start_time=parameters.get("start_time"),
-            end_time=parameters.get("end_time")
+        result = await self.tool_registry.call(
+            cloud_provider="aws",
+            service="xray",
+            operation="get_trace_summaries",
+            parameters={
+                "filter_expression": filter_expression,
+                "start_time": parameters.get("start_time"),
+                "end_time": parameters.get("end_time")
+            }
         )
 
         return result

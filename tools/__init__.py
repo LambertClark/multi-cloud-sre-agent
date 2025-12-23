@@ -3,12 +3,12 @@
 """
 from .cloud_tools import CloudToolRegistry
 from .aws_tools import AWSMonitoringTools
-# from .azure_tools import AzureMonitoringTools
+from .azure_tools import AzureMonitoringTools
 # from .gcp_tools import GCPMonitoringTools
 
 __all__ = [
     'CloudToolRegistry',
     'AWSMonitoringTools',
-    # 'AzureMonitoringTools',
+    'AzureMonitoringTools',
     # 'GCPMonitoringTools',
 ]
