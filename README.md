@@ -123,14 +123,30 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
 
 ### 运行
 ```bash
+# 推荐：使用uv运行（自动管理依赖和虚拟环境）
 # 交互模式
-python main.py --mode interactive
+uv run python main.py --mode interactive
 
 # 单次查询
-python main.py -m query -q "列出AWS EC2实例"
+uv run python main.py -m query -q "列出AWS EC2实例"
 
 # 健康检查模式
-python main.py --mode health
+uv run python main.py --mode health
+
+# Showcase演示（包含所有功能演示）
+uv run python demo_showcase.py
+```
+
+**或者手动激活虚拟环境后运行：**
+```bash
+# Windows
+.venv\Scripts\activate
+
+# Linux/Mac
+source .venv/bin/activate
+
+# 然后可以直接用python
+python main.py --mode interactive
 ```
 
 ## 📖 核心组件详解

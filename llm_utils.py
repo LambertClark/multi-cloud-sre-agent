@@ -50,6 +50,7 @@ def create_chat_llm(
         )
 
     # 创建ChatOpenAI实例
+    # 注意：硅基流动API不支持某些OpenAI的参数
     return ChatOpenAI(
         model=model,
         api_key=api_key,
@@ -57,7 +58,9 @@ def create_chat_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
-        http_client=http_client
+        http_client=http_client,
+        # 硅基流动API兼容性配置
+        model_kwargs={},  # 清空额外参数
     )
 
 
@@ -103,6 +106,7 @@ def create_async_chat_llm(
         )
 
     # 创建ChatOpenAI实例
+    # 注意：硅基流动API不支持某些OpenAI的参数
     return ChatOpenAI(
         model=model,
         api_key=api_key,
@@ -110,5 +114,7 @@ def create_async_chat_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
-        http_async_client=async_http_client
+        http_async_client=async_http_client,
+        # 硅基流动API兼容性配置
+        model_kwargs={},  # 清空额外参数
     )
